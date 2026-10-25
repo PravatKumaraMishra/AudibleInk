@@ -26,8 +26,8 @@ The app is built and signed locally. It references `.venv` in this project, so I
 
 ## Reading a document
 
-1. Paste Markdown into **Write**, or use **Open Markdown** / Command-O to import a UTF-8 file.
-2. Choose a voice and set the pace. **Ryan · Qwen3 0.6B · 8-bit** is the default.
+1. Paste Markdown into **Input**, or use **Open Markdown** / Command-O to import a UTF-8 file.
+2. Choose a voice and set the pace. **Heart · American · Kokoro** is the default.
 3. Click **Start listening**, press Command-Return, or click a passage in **Preview**.
 4. Use Pause, Resume, and Stop to control playback. I stop reading before editing the source.
 
@@ -37,21 +37,23 @@ To jump ahead, I click another passage or select text and choose **Read from sel
 
 Code blocks stay visible in Preview but are skipped during speech unless **Read code blocks** is enabled. Link labels, image alt text, inline code, and table cells are read aloud. Link destinations, raw HTML, and YAML front matter are skipped. Remote images and embedded HTML are not loaded in Preview.
 
-My current draft and pronunciation dictionary are saved in the app's local macOS preferences. Voice, pace, dictionary, and code settings apply to the next reading.
+My current draft and pronunciation dictionary are saved in the app's local macOS preferences. Voice, model, dictionary, and code settings apply to the next reading. Pace changes apply immediately. The model choice is saved between launches.
 
 ## Local speech engines
 
 | Engine | Model / source | Voices in Murmur |
 | --- | --- | --- |
-| Qwen3-TTS | `mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit` | Ryan, Aiden, Vivian |
 | Kokoro | `mlx-community/Kokoro-82M-bf16` | Heart, Bella, Michael, Emma, George |
-| macOS speech | Installed English (India) voices | Rishi, plus Aman or Tara when macOS exposes them |
 
-I use Qwen's 0.6B 8-bit model to try a larger neural engine on an M1 Air. Kokoro is the smaller alternative. Neither model's presets in this app are dedicated Indian English voices; I use the installed macOS voices for that accent.
+Kokoro is the local neural engine, with American Heart (`af_heart`) selected by default. Its [official voice catalogue](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md) lists American and British English voices and separate Hindi voices, but no dedicated Indian English voices. Murmur offers Kokoro voices only.
 
-The worker loads models on demand and keeps one neural engine resident at a time. Switching from Qwen to Kokoro, or back, releases the previous neural model. It generates short passages and buffers at most one future passage. Playback can wait between passages if generation falls behind. Stopping cancels playback immediately; an in-flight calculation can still finish before the next request is handled. Quitting terminates the worker.
+The worker loads Kokoro on demand and keeps it resident for subsequent passages. After one minute without reading or document preparation, Murmur terminates the worker to release its model, Python runtime, and GPU memory. Editing resets the idle countdown. Active and paused readings are preserved. Starting again reloads the worker and model, so the first passage takes longer. It generates short passages and buffers at most one future passage. Playback can wait between passages if generation falls behind. Stopping cancels playback immediately; an in-flight calculation can still finish before the next request is handled. Quitting terminates the worker.
 
-Kokoro applies pace during synthesis. Qwen applies pace through the native audio player's playback rate. Actual latency and memory use depend on the machine, available memory, and document content; I have not established an M1 Air performance benchmark.
+Kokoro uses `mlx-community/Kokoro-82M-bf16`. The model downloads on first use.
+
+The larger window and reduced margins give Input and Preview more room. Use **Expand document** in the document header to hide the sidebar; **Show voice controls** restores it. The window supports resizing and macOS full screen.
+
+Kokoro generates at its normal pace; the audio player adjusts playback rate immediately, including buffered passages. Actual latency and memory use depend on the machine, available memory, and document content; I have not established an M1 Air performance benchmark.
 
 The first use downloads model files from Hugging Face into:
 
@@ -73,7 +75,7 @@ SQL = sequel
 @GetMapping = get mapping
 ```
 
-I can change `SQL = sequel` to `SQL = S Q L`, or add a phonetic spelling for a name. The optional technical cleanup separates camelCase words and reads common operators aloud. These rules work with both neural engines and macOS speech. A larger model can still mispronounce technical vocabulary, so I keep the dictionary available for either engine.
+I can change `SQL = sequel` to `SQL = S Q L`, or add a phonetic spelling for a name. The optional technical cleanup separates camelCase words and reads common operators aloud. These rules work with every Kokoro model. Neural speech can still mispronounce technical vocabulary, so I keep the dictionary available for each model.
 
 ## Development
 
@@ -84,15 +86,17 @@ I can change `SQL = sequel` to `SQL = S Q L`, or add a phonetic spelling for a n
 # Run Markdown, rendering, alignment, and pronunciation tests.
 .venv/bin/python -m unittest discover -s tests -v
 
+# Check idle release and restart with an accelerated timeout.
+.venv/bin/python scripts/check_idle.py
+
 # Exercise real speech generation and write a sample WAV.
 .venv/bin/python scripts/check_neural.py
-.venv/bin/python scripts/check_neural.py --qwen
 
 # Check the app's local signature.
 codesign --verify --deep --strict build/Murmur.app
 ```
 
-The speech checks write `build/kokoro-sample.wav` and `build/qwen-sample.wav`. They verify that generated audio is nonempty and non-silent. Both engines have also been exercised through the desktop app with Preview highlighting. The test suite covers Markdown cleanup, rendered structure, speech anchors across formatting, unsafe HTML, and pronunciation replacements.
+The speech check writes `build/kokoro-bf16-sample.wav` and verifies that generated audio is nonempty and non-silent. Kokoro also supports Preview highlighting in the desktop app. The test suite covers Markdown cleanup, rendered structure, speech anchors across formatting, unsafe HTML, and pronunciation replacements.
 
 `requirements.txt` pins the direct dependencies and compatible tokenizer helpers. `requirements.lock` records the full installed Python environment. For a complete dependency reproduction, I can install the lock file into a Python 3.11 environment with `uv pip install --python .venv/bin/python -r requirements.lock`.
 
@@ -116,7 +120,7 @@ Assets/                      App icon and README preview
 Sources/MarkdownVoice.swift  SwiftUI interface, playback, and worker lifecycle
 Sources/MarkdownPreview.swift Local Markdown preview and reading navigation
 backend/document.py          Markdown rendering, speech anchors, pronunciation
-backend/worker.py            JSON-lines worker for Kokoro and Qwen
+backend/worker.py            JSON-lines worker for Kokoro
 scripts/                     Setup, build, icon generation, and speech checks
 tests/                       Markdown and pronunciation regression tests
 ```
@@ -136,4 +140,4 @@ I keep virtual environments, model caches, generated app bundles, audio samples,
 
 ## Dependencies and model licenses
 
-Murmur uses [MLX Audio](https://github.com/Blaizzy/mlx-audio), [Qwen3-TTS 8-bit weights](https://huggingface.co/mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit), [Kokoro weights](https://huggingface.co/mlx-community/Kokoro-82M-bf16), [Misaki](https://github.com/hexgrad/misaki), and [markdown-it-py](https://github.com/executablebooks/markdown-it-py). Their code, models, and voice assets retain their respective licenses.
+Murmur uses [MLX Audio](https://github.com/Blaizzy/mlx-audio), [Kokoro weights](https://huggingface.co/mlx-community/Kokoro-82M-bf16), [Misaki](https://github.com/hexgrad/misaki), and [markdown-it-py](https://github.com/executablebooks/markdown-it-py). Their code, models, and voice assets retain their respective licenses.

@@ -7,12 +7,12 @@ struct Voice: Identifiable, Hashable {
     let id: String
     let name: String
     let detail: String
-    var neural: Bool { (id.hasPrefix("kokoro:") || id.hasPrefix("qwen:")) }
 }
 
-final class Reader: NSObject, ObservableObject, AVSpeechSynthesizerDelegate, AVAudioPlayerDelegate {
-    @Published var markdown = "# A little space to listen\n\nPaste your Markdown here, or open a file. Turn your notes, articles, and ideas into a voice you can take your time with.\n\n## Made for your Mac\n\nChoose English (India) for a familiar voice, or try Kokoro for local neural speech.\n\n- Your words stay on this machine.\n- Links and formatting become clean, readable speech.\n- Code blocks are skipped unless you include them."
+final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
+    @Published var markdown = "# A little space to listen\n\nPaste your Markdown here, or open a file. Turn your notes, articles, and ideas into a voice you can take your time with.\n\n## Made for your Mac\n\nListen with Heart or choose another Kokoro voice for local neural speech.\n\n- Your words stay on this machine.\n- Links and formatting become clean, readable speech.\n- Code blocks are skipped unless you include them."
     @Published var voice = ""
+    @Published var focusDocument = false
     @Published var speed = 1.0
     @Published var includeCode = false
     @Published var status = "Ready when you are"
@@ -32,7 +32,8 @@ final class Reader: NSObject, ObservableObject, AVSpeechSynthesizerDelegate, AVA
     @Published var filename = "Untitled.md"
     @Published var error: String?
     let voices: [Voice]
-    private let speech = AVSpeechSynthesizer()
+    private var idleWork: DispatchWorkItem?
+    private let idleTimeout: TimeInterval = 60
     private var player: AVAudioPlayer?
     private var process: Process?
     private var input: FileHandle?
@@ -44,30 +45,17 @@ final class Reader: NSObject, ObservableObject, AVSpeechSynthesizerDelegate, AVA
     private var generating = false
     private var queue: [(Int, URL)] = []
     private var selectedVoice = ""
-    private var selectedSpeed = 1.0
     private var diagnostics = ""
-    private var currentUtterance: AVSpeechUtterance?
 
     override init() {
-        let installed = AVSpeechSynthesisVoice.speechVoices()
-        let indian = installed.filter { $0.language.replacingOccurrences(of: "_", with: "-").lowercased() == "en-in" }
-            .sorted { $0.name < $1.name }
-        var list = indian.map { Voice(id: $0.identifier, name: $0.name, detail: "English (India) · macOS") }
-        if list.isEmpty, let english = installed.first(where: { $0.language.hasPrefix("en") }) {
-            list.append(Voice(id: english.identifier, name: english.name, detail: "English · macOS"))
-        }
-        list += [Voice(id: "kokoro:af_heart", name: "Heart", detail: "American · Kokoro"),
+        let list = [Voice(id: "kokoro:af_heart", name: "Heart", detail: "American · Kokoro"),
                  Voice(id: "kokoro:af_bella", name: "Bella", detail: "American · Kokoro"),
                  Voice(id: "kokoro:am_michael", name: "Michael", detail: "American · Kokoro"),
                  Voice(id: "kokoro:bf_emma", name: "Emma", detail: "British · Kokoro"),
                  Voice(id: "kokoro:bm_george", name: "George", detail: "British · Kokoro")]
-        list += [Voice(id: "qwen:Ryan", name: "Ryan", detail: "English · Qwen3 0.6B · 8-bit"),
-                 Voice(id: "qwen:Aiden", name: "Aiden", detail: "English · Qwen3 0.6B · 8-bit"),
-                 Voice(id: "qwen:Vivian", name: "Vivian", detail: "English · Qwen3 0.6B · 8-bit")]
         voices = list
         super.init()
-        voice = "qwen:Ryan"
-        speech.delegate = self
+        voice = "kokoro:af_heart"
         if let saved = UserDefaults.standard.string(forKey: "document") { markdown = saved }
         if let saved = UserDefaults.standard.string(forKey: "pronunciations") { pronunciations = saved }
         refreshPreview()
@@ -75,13 +63,30 @@ final class Reader: NSObject, ObservableObject, AVSpeechSynthesizerDelegate, AVA
     }
 
     var wordCount: Int { markdown.split(whereSeparator: { $0.isWhitespace }).count }
-    var isNeural: Bool { voice.hasPrefix("kokoro:") || voice.hasPrefix("qwen:") }
-    private var selectedNeural: Bool { selectedVoice.hasPrefix("kokoro:") || selectedVoice.hasPrefix("qwen:") }
-    private var engineLabel: String { selectedVoice.hasPrefix("qwen:") ? "Qwen3 0.6B · 8-bit" : "Kokoro" }
-    var voiceDescription: String {
-        if voice.hasPrefix("qwen:") { return "Qwen3-TTS · 0.6B · 8-bit\nMLX on your Mac · larger model" }
-        if isNeural { return "Kokoro · 82M parameters\nMLX acceleration on your Mac" }
-        return "English (India) & installed voices\nApple’s on-device speech engine"
+    private var engineLabel: String { "Kokoro" }
+
+    private func scheduleIdleRelease() {
+        idleWork?.cancel()
+        guard !active else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, !self.active else { return }
+            self.releaseWorker()
+            self.speechChunks.removeAll()
+            self.status = "Speech memory released · ready to reload"
+        }
+        idleWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + idleTimeout, execute: work)
+    }
+
+    private func releaseWorker() {
+        idleWork?.cancel(); idleWork = nil
+        let task = process
+        process = nil
+        (task?.standardOutput as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        (task?.standardError as? Pipe)?.fileHandleForReading.readabilityHandler = nil
+        try? input?.close(); input = nil
+        callbacks.removeAll(); buffer.removeAll(); diagnostics = ""
+        if task?.isRunning == true { task?.terminate() }
     }
     var progress: Double { chunks.isEmpty ? 0 : Double(current) / Double(chunks.count) }
 
@@ -105,16 +110,20 @@ final class Reader: NSObject, ObservableObject, AVSpeechSynthesizerDelegate, AVA
         env["HF_HOME"] = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/MarkdownVoice/huggingface").path
         task.environment = env
         task.standardInput = stdin; task.standardOutput = stdout; task.standardError = stderr
-        stdout.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            DispatchQueue.main.async { self?.receive(data) }
-        }
-        stderr.fileHandleForReading.readabilityHandler = { [weak self] handle in
+        stdout.fileHandleForReading.readabilityHandler = { [weak self, weak task] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
             DispatchQueue.main.async {
-                self?.diagnostics = String((self?.diagnostics ?? "").suffix(2000)) + (String(data: data, encoding: .utf8) ?? "")
+                guard let self, self.process === task else { return }
+                self.receive(data)
+            }
+        }
+        stderr.fileHandleForReading.readabilityHandler = { [weak self, weak task] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            DispatchQueue.main.async {
+                guard let self, self.process === task else { return }
+                self.diagnostics = String(self.diagnostics.suffix(2000)) + (String(data: data, encoding: .utf8) ?? "")
             }
         }
         task.terminationHandler = { [weak self] task in
@@ -136,10 +145,12 @@ final class Reader: NSObject, ObservableObject, AVSpeechSynthesizerDelegate, AVA
             guard let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
                   let id = message["id"] as? String else { continue }
             callbacks.removeValue(forKey: id)?(message)
+            if callbacks.isEmpty { scheduleIdleRelease() }
         }
     }
 
     private func request(_ payload: [String: Any], completion: @escaping ([String: Any]) -> Void) {
+        idleWork?.cancel()
         do {
             try launchWorker()
             let id = UUID().uuidString
@@ -180,7 +191,7 @@ final class Reader: NSObject, ObservableObject, AVSpeechSynthesizerDelegate, AVA
     func start(at index: Int = 0) {
         stop()
         error = nil; active = true; status = "Preparing your Markdown…"
-        selectedVoice = voice; selectedSpeed = speed
+        selectedVoice = voice
         let session = generation
         UserDefaults.standard.set(pronunciations, forKey: "pronunciations")
         request(["command": "prepare", "text": markdown, "include_code": includeCode, "pronunciations": pronunciations, "technical": technical]) { [weak self] response in
@@ -194,18 +205,8 @@ final class Reader: NSObject, ObservableObject, AVSpeechSynthesizerDelegate, AVA
             self.nextIndex = self.current
             self.followReading = true
             self.preview = true
-            if self.selectedNeural { self.fillQueue() } else { self.speakSystem() }
+            self.fillQueue()
         }
-    }
-
-    private func speakSystem() {
-        guard active, !paused, current < chunks.count else { return }
-        let utterance = AVSpeechUtterance(string: speechChunks[current])
-        utterance.voice = AVSpeechSynthesisVoice(identifier: selectedVoice)
-        utterance.rate = Float(selectedSpeed) * AVSpeechUtteranceDefaultSpeechRate
-        status = "Reading · \(utterance.voice?.language ?? "English")"
-        currentUtterance = utterance
-        speech.speak(utterance)
     }
 
     private func fillQueue() {
@@ -214,7 +215,7 @@ final class Reader: NSObject, ObservableObject, AVSpeechSynthesizerDelegate, AVA
         let index = nextIndex; nextIndex += 1
         let session = generation
         if player == nil { status = "Generating speech… First use may download the model." }
-        request(["command": "synth", "text": speechChunks[index], "voice": String(selectedVoice.split(separator: ":", maxSplits: 1)[1]), "engine": selectedVoice.hasPrefix("qwen:") ? "qwen" : "kokoro", "speed": selectedSpeed]) { [weak self] response in
+        request(["command": "synth", "text": speechChunks[index], "voice": String(selectedVoice.split(separator: ":", maxSplits: 1)[1]), "engine": "kokoro", "speed": 1.0]) { [weak self] response in
             guard let self else { return }
             guard self.generation == session else {
                 if let path = response["path"] as? String { try? FileManager.default.removeItem(atPath: path) }
@@ -238,8 +239,9 @@ final class Reader: NSObject, ObservableObject, AVSpeechSynthesizerDelegate, AVA
         do {
             let audio = try AVAudioPlayer(contentsOf: url)
             try? FileManager.default.removeItem(at: url)
+            audio.enableRate = true
+            audio.rate = Float(speed)
             audio.delegate = self
-            if selectedVoice.hasPrefix("qwen:") { audio.enableRate = true; audio.rate = Float(selectedSpeed) }
             player = audio; current = index
             guard audio.play() else { throw NSError(domain: "Reader", code: 2, userInfo: [NSLocalizedDescriptionKey: "Audio playback could not start."]) }
             status = "Reading · \(engineLabel) on Apple Silicon"
@@ -247,35 +249,37 @@ final class Reader: NSObject, ObservableObject, AVSpeechSynthesizerDelegate, AVA
         } catch { fail(error.localizedDescription) }
     }
 
+    func updatePlaybackSpeed() {
+        speed = min(2.0, max(0.5, speed))
+        player?.rate = Float(speed)
+    }
+
+    func togglePlayback() {
+        if active { togglePause() }
+        else if !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { start() }
+    }
+
     func togglePause() {
         guard active else { return }
         paused.toggle()
         if paused {
-            player?.pause(); speech.pauseSpeaking(at: .immediate); status = "Paused"
-        } else if selectedNeural {
-            if let player { player.play(); status = "Reading · \(engineLabel) on Apple Silicon" } else { playNext() }
+            player?.pause(); status = "Paused"
         } else {
-            if speech.isPaused { speech.continueSpeaking(); status = "Reading" } else { speakSystem() }
+            if let player { player.play(); status = "Reading · \(engineLabel) on Apple Silicon" } else { playNext() }
         }
     }
 
     func stop() {
         generation = UUID(); active = false; paused = false
-        currentUtterance = nil
-        speech.stopSpeaking(at: .immediate); player?.stop(); player = nil
+        player?.stop(); player = nil
         for (_, url) in queue { try? FileManager.default.removeItem(at: url) }
-        queue.removeAll(); generating = false; nextIndex = 0; current = 0; chunks = []
+        queue.removeAll(); generating = false; nextIndex = 0; current = 0; chunks = []; speechChunks = []
+        scheduleIdleRelease()
         status = "Ready when you are"
     }
-    private func finish() { active = false; paused = false; current = chunks.count; status = "Finished. A little more clarity." }
+    private func finish() { active = false; paused = false; current = chunks.count; status = "Finished. A little more clarity."; speechChunks.removeAll(); scheduleIdleRelease() }
     private func fail(_ message: String) { stop(); error = message; status = "Something needs attention" }
-    func shutdown() { stop(); process?.terminate() }
-    func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didFinish utterance: AVSpeechUtterance) {
-        guard active, currentUtterance === utterance, !selectedNeural else { return }
-        currentUtterance = nil
-        current += 1
-        if current == chunks.count { finish() } else { speakSystem() }
-    }
+    func shutdown() { stop(); releaseWorker() }
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         guard self.player === player else { return }
         self.player = nil
@@ -292,11 +296,13 @@ final class Reader: NSObject, ObservableObject, AVSpeechSynthesizerDelegate, AVA
 
 struct ContentView: View {
     @ObservedObject var reader: Reader
+    @FocusState private var inputFocused: Bool
     private let ink = Color(red: 0.16, green: 0.23, blue: 0.21)
     private let paper = Color(red: 0.97, green: 0.96, blue: 0.93)
     var body: some View {
         HStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 25) {
+            if !reader.focusDocument {
+            VStack(alignment: .leading, spacing: 18) {
                 HStack(spacing: 10) {
                     Image(systemName: "waveform.circle.fill").font(.system(size: 34)).foregroundStyle(ink)
                     VStack(alignment: .leading, spacing: 2) {
@@ -314,60 +320,62 @@ struct ContentView: View {
                     Picker("Voice", selection: $reader.voice) {
                         ForEach(reader.voices) { voice in Text("\(voice.name) · \(voice.detail)").tag(voice.id) }
                     }.labelsHidden().frame(maxWidth: .infinity)
-                    Text(reader.voiceDescription)
-                        .font(.system(size: 11)).foregroundStyle(.secondary).lineSpacing(4)
                 }
                 VStack(alignment: .leading, spacing: 10) {
-                    HStack { Text("Pace"); Spacer(); Text(String(format: "%.1f×", reader.speed)).monospacedDigit() }.font(.system(size: 12))
-                    Slider(value: $reader.speed, in: 0.6...1.6, step: 0.1).tint(ink)
+                    HStack { Text("Pace"); Spacer(); Text(String(format: "%.2f×", reader.speed)).monospacedDigit() }.font(.system(size: 12))
+                    Slider(value: $reader.speed, in: 0.5...2.0, step: 0.25).tint(ink)
                     HStack { Text("Unhurried"); Spacer(); Text("Brisk") }.font(.system(size: 10)).foregroundStyle(.secondary)
                 }
                 Toggle("Read code blocks", isOn: $reader.includeCode).font(.system(size: 12)).toggleStyle(.checkbox)
                 Button("Pronunciation dictionary…") { reader.showPronunciations = true }.buttonStyle(.plain).font(.system(size: 12))
-                Text("Voice, pace, and code settings apply to your next reading.").font(.system(size: 10)).foregroundStyle(.secondary)
                 Spacer()
-                VStack(alignment: .leading, spacing: 8) {
-                    Label("Entirely on your Mac", systemImage: "lock.shield").font(.system(size: 12, weight: .medium))
-                    Text("No account. No text sent to a server. Neural models download on first use.").font(.system(size: 11)).foregroundStyle(.secondary).lineSpacing(4)
-                }
-            }.padding(25).frame(width: 265).background(paper)
+            }.padding(18).frame(width: 245).background(paper)
             Rectangle().fill(ink.opacity(0.1)).frame(width: 1)
+            }
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
                     Label(reader.filename, systemImage: "doc.text").font(.system(size: 12)).foregroundStyle(.secondary)
                     Spacer()
+                    Button { reader.focusDocument.toggle() } label: {
+                        Image(systemName: reader.focusDocument ? "sidebar.left" : "arrow.up.left.and.arrow.down.right")
+                    }.buttonStyle(.plain).help(reader.focusDocument ? "Show voice controls" : "Expand document")
                     Text("LOCAL AUDIO").font(.system(size: 9, weight: .semibold)).tracking(1.5).foregroundStyle(ink)
                     Circle().fill(Color.green.opacity(0.7)).frame(width: 6, height: 6)
-                }.padding(.horizontal, 36).padding(.vertical, 23)
+                }.padding(.horizontal, 18).padding(.vertical, 12)
                 Divider()
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Give your words a voice.").font(.system(size: 31, weight: .regular, design: .serif))
-                        Text("A quiet place to read with your ears.").font(.system(size: 13)).foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    ForEach([false, true], id: \.self) { preview in
+                        Button {
+                            reader.preview = preview
+                            inputFocused = false
+                        } label: {
+                            Text(preview ? "Preview" : "Input")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(reader.preview == preview ? Color.white : ink)
+                                .padding(.horizontal, 18).padding(.vertical, 8)
+                                .background(reader.preview == preview ? ink : ink.opacity(0.07))
+                                .clipShape(RoundedRectangle(cornerRadius: 7))
+                        }.buttonStyle(.plain)
                     }
                     Spacer()
-                    Picker("View", selection: $reader.preview) { Text("Write").tag(false); Text("Preview").tag(true) }.pickerStyle(.segmented).labelsHidden().frame(width: 150)
-                }.padding(36)
+                }.padding(.horizontal, 18).padding(.vertical, 10)
                 ZStack(alignment: .topLeading) {
                     if reader.preview {
                         MarkdownPreview(reader: reader)
                     } else {
-                        TextEditor(text: $reader.markdown).font(.system(size: 14, design: .monospaced)).lineSpacing(7).scrollContentBackground(.hidden).padding(18).disabled(reader.active)
+                        TextEditor(text: $reader.markdown).font(.system(size: 14, design: .monospaced)).lineSpacing(7).scrollContentBackground(.hidden).padding(10).focused($inputFocused)
                     }
-                }.background(Color.white.opacity(0.75)).clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(ink.opacity(0.1))).padding(.horizontal, 36)
-                HStack { if reader.preview { Toggle("Follow reading", isOn: $reader.followReading).toggleStyle(.checkbox) } else { Text("Markdown formatting is cleaned before reading.") }; Spacer(); Text("\(reader.wordCount) words · ~\(max(1, Int(Double(reader.wordCount) / (155 * reader.speed)))) min") }
-                    .font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 36).padding(.vertical, 14)
+                }.frame(maxWidth: .infinity, maxHeight: .infinity).background(Color.white.opacity(0.75)).clipShape(RoundedRectangle(cornerRadius: 12))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(ink.opacity(0.1))).padding(.horizontal, 18)
+                HStack { if reader.preview { Toggle("Follow reading", isOn: $reader.followReading).toggleStyle(.checkbox) }; Spacer(); Text("\(reader.wordCount) words · ~\(max(1, Int(Double(reader.wordCount) / (155 * reader.speed)))) min") }
+                    .font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 18).padding(.vertical, 10)
                 if let error = reader.error {
-                    Text(error).font(.system(size: 12)).foregroundStyle(.red).textSelection(.enabled).padding(.horizontal, 36).padding(.bottom, 12)
+                    Text(error).font(.system(size: 12)).foregroundStyle(.red).textSelection(.enabled).padding(.horizontal, 18).padding(.bottom, 12)
                 }
                 VStack(alignment: .leading, spacing: 14) {
-                    if reader.active, reader.current < reader.chunks.count {
-                        Text(reader.chunks[reader.current]).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
-                    }
                     ProgressView(value: reader.progress).tint(ink)
                     HStack(spacing: 14) {
-                        Button(action: { reader.active ? reader.togglePause() : reader.start() }) {
+                        Button(action: reader.togglePlayback) {
                             Label(reader.active ? (reader.paused ? "Resume" : "Pause") : "Start listening", systemImage: reader.active && !reader.paused ? "pause.fill" : "play.fill")
                                 .font(.system(size: 13, weight: .medium)).padding(.horizontal, 18).padding(.vertical, 12)
                                 .background(ink).foregroundStyle(.white).clipShape(Capsule())
@@ -380,22 +388,72 @@ struct ContentView: View {
                         Spacer()
                         Image(systemName: "waveform").font(.system(size: 26)).foregroundStyle(ink.opacity(0.45))
                     }
-                }.padding(24).background(paper).clipShape(RoundedRectangle(cornerRadius: 14)).padding(.horizontal, 36).padding(.bottom, 28)
+                }.padding(16).background(paper).clipShape(RoundedRectangle(cornerRadius: 14)).padding(.horizontal, 18).padding(.bottom, 16)
             }.background(Color(red: 0.99, green: 0.985, blue: 0.97))
-        }.foregroundStyle(ink).frame(minWidth: 960, minHeight: 700)
-        .onChange(of: reader.markdown) { reader.documentChanged() }
+        }.foregroundStyle(ink).preferredColorScheme(.light).frame(minWidth: 960, minHeight: 700)
+        .background(PlaybackShortcuts { key in
+            switch key {
+            case " ": reader.togglePlayback()
+            case "s": reader.stop()
+            case "i":
+                reader.preview = false
+                DispatchQueue.main.async { inputFocused = true }
+            case "[": reader.speed = max(0.5, reader.speed - 0.25)
+            case "]": reader.speed = min(2.0, reader.speed + 0.25)
+            default: return
+            }
+        })
+        .onChange(of: reader.speed) { reader.updatePlaybackSpeed() }
+        .onChange(of: reader.markdown) {
+            if reader.active { reader.stop() }
+            reader.documentChanged()
+        }
         .onChange(of: reader.includeCode) { reader.refreshPreview() }
         .onChange(of: reader.pronunciations) { UserDefaults.standard.set(reader.pronunciations, forKey: "pronunciations") }
         .sheet(isPresented: $reader.showPronunciations) {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Say it your way").font(.system(size: 25, design: .serif))
-                Text("One rule per line: term = how it should sound. Matches are case-sensitive and apply to whole terms. Your preview keeps the original text.").font(.system(size: 13)).foregroundStyle(.secondary)
                 TextEditor(text: $reader.pronunciations).font(.system(size: 13, design: .monospaced)).frame(height: 290).border(Color.gray.opacity(0.3))
                 Toggle("Separate camelCase words and speak common operators", isOn: $reader.technical)
-                Text("Try API = A P I, JSON = jay son, or a phonetic spelling for an unfamiliar name. Rules apply on your next reading, in both engines.").font(.system(size: 12)).foregroundStyle(.secondary)
                 HStack { Spacer(); Button("Done") { reader.showPronunciations = false }.keyboardShortcut(.defaultAction) }
             }.padding(28).frame(width: 570)
         }
+    }
+}
+
+struct PlaybackShortcuts: NSViewRepresentable {
+    let action: (String) -> Void
+    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        context.coordinator.view = view
+        context.coordinator.install()
+        return view
+    }
+    func updateNSView(_ view: NSView, context: Context) { context.coordinator.action = action }
+    static func dismantleNSView(_ view: NSView, coordinator: Coordinator) { coordinator.remove() }
+
+    final class Coordinator {
+        weak var view: NSView?
+        var action: (String) -> Void
+        private var monitor: Any?
+        init(action: @escaping (String) -> Void) { self.action = action }
+        func install() {
+            monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                guard let self, let window = self.view?.window,
+                      window.isKeyWindow, window.attachedSheet == nil,
+                      event.window === window,
+                      event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+                      let key = event.characters?.lowercased(),
+                      [" ", "s", "i", "[", "]"].contains(key) else { return event }
+                if let text = window.firstResponder as? NSTextView, text.isEditable { return event }
+                if let text = window.firstResponder as? NSTextField, text.isEditable { return event }
+                if !event.isARepeat { self.action(key) }
+                return nil
+            }
+        }
+        func remove() { if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil }
+        deinit { remove() }
     }
 }
 
@@ -412,7 +470,7 @@ struct ContentView: View {
                     }
                 }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in reader.shutdown() }
-        }.windowStyle(.hiddenTitleBar).defaultSize(width: 1120, height: 780)
+        }.windowStyle(.hiddenTitleBar).defaultSize(width: 1400, height: 900)
         .commands { CommandGroup(replacing: .newItem) { Button("Open Markdown…", action: reader.openFile).keyboardShortcut("o") } }
     }
 }

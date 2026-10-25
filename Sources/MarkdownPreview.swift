@@ -50,7 +50,7 @@ struct MarkdownPreview: NSViewRepresentable {
         <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'none'; connect-src 'none'">
         <style>
         :root { color-scheme: light; } * { box-sizing: border-box; }
-        body { margin: 0; padding: 28px 34px 70px; color: #293b35; background: #fffefa; font: 16px/1.8 -apple-system, BlinkMacSystemFont, sans-serif; overflow-wrap: anywhere; }
+        body { margin: 0; padding: 18px 22px 40px; color: #293b35; background: #fffefa; font: 16px/1.8 -apple-system, BlinkMacSystemFont, sans-serif; overflow-wrap: anywhere; }
         h1,h2,h3,h4,h5,h6 { line-height:1.35; margin: 1.5em 0 .6em; color:#203a30; }
         h1 { font: 600 32px/1.3 Georgia,serif; border-bottom:1px solid #e5e8de; padding-bottom:16px; margin-top:0; }
         h2 { font: 600 25px/1.4 Georgia,serif; border-bottom:1px solid #e5e8de; padding-bottom:8px; }
@@ -65,7 +65,6 @@ struct MarkdownPreview: NSViewRepresentable {
         ::selection { background:#cddfb6; } .hint { font-size:12px; color:#6e7e70; padding-bottom:16px; border-bottom:1px solid #e5e8de; margin-bottom:24px; }
         #selectionPlay { display:none; position:fixed; bottom:18px; right:20px; border:0; border-radius:20px; padding:12px 18px; color:white; background:#293b35; box-shadow:0 3px 15px #0002; cursor:pointer; }
         </style></head><body>
-        <div class="hint">Click a passage to read from there, or select text and choose “Read from selection”. Scroll freely; turn Follow on to return to the current passage.</div>
         <main>
         """# + body + #"""
         </main><button id="selectionPlay">▶ Read from selection</button>
