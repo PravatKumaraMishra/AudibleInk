@@ -9,8 +9,6 @@ import tempfile
 import traceback
 
 MODEL = 'mlx-community/Kokoro-82M-bf16'
-QWEN_MODEL = 'mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit'
-QWEN_VOICES = {'Ryan', 'Aiden', 'Vivian'}
 VOICES = {'af_heart', 'af_bella', 'am_adam', 'am_michael', 'bf_emma', 'bm_george'}
 
 
@@ -23,7 +21,6 @@ def markdown_chunks(source, include_code=False, limit=360):
 
 def main():
     model = None
-    loaded_engine = None
     with tempfile.TemporaryDirectory(prefix='markdown-voice-') as temp:
         for line in sys.stdin:
             try:
@@ -37,28 +34,24 @@ def main():
                         import numpy as np
                         import soundfile as sf
                         engine = request.get('engine', 'kokoro')
-                        if engine not in ('kokoro', 'qwen'):
+                        if engine != 'kokoro':
                             raise ValueError('Unknown engine')
-                        if request['voice'] not in (QWEN_VOICES if engine == 'qwen' else VOICES):
+                        if request['voice'] not in VOICES:
                             raise ValueError('Unknown voice')
                         speed = float(request['speed'])
                         if not 0.5 <= speed <= 2:
                             raise ValueError('Speed must be between 0.5 and 2')
-                        if model is None or loaded_engine != engine:
+                        if model is None:
                             import gc
                             import mlx.core as mx
                             from mlx_audio.tts.utils import load_model
                             model = None
                             gc.collect()
                             mx.clear_cache()
-                            model = load_model(QWEN_MODEL if engine == 'qwen' else MODEL)
-                            loaded_engine = engine
+                            model = load_model(MODEL)
                         audio = []
                         sample_rate = 24000
-                        if engine == 'qwen':
-                            results = model.generate_custom_voice(text=request['text'], speaker=request['voice'], language='English', max_tokens=1536)
-                        else:
-                            results = model.generate(request['text'], voice=request['voice'], speed=speed, lang_code=request['voice'][0])
+                        results = model.generate(request['text'], voice=request['voice'], speed=speed, lang_code=request['voice'][0])
                         for part in results:
                             audio.append(np.asarray(part.audio).reshape(-1))
                             sample_rate = part.sample_rate
@@ -67,6 +60,7 @@ def main():
                         path = str(Path(temp) / f'{rid}.wav')
                         sf.write(path, np.concatenate(audio), sample_rate)
                         result = {'path': path}
+                        del audio, part, results
                     else:
                         raise ValueError('Unknown command')
                 print(json.dumps({'id': rid, **result}), flush=True)
