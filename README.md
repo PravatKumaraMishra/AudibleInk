@@ -39,6 +39,26 @@ Code blocks stay visible in Preview but are skipped during speech unless **Read 
 
 My current draft and pronunciation dictionary are saved in the app's local macOS preferences. Voice, model, dictionary, and code settings apply to the next reading. Pace changes apply immediately. The model choice is saved between launches.
 
+## Keyboard shortcuts
+
+Open **Help → Keyboard Shortcuts…** in the macOS menu bar to see the assigned keys.
+
+| Shortcut | Action |
+| --- | --- |
+| Space / Command-Return | Start, pause, or resume reading |
+| Command-S | Start or stop playback |
+| S | Stop playback |
+| I / Command-I | Switch to Input and focus the editor |
+| Escape | Leave the editor and enable single-key shortcuts |
+| [ / Command-[ | Decrease pace by 0.25× |
+| ] / Command-] | Increase pace by 0.25× |
+| Command-P | Toggle Input / Preview |
+| Command-F | Toggle Follow reading |
+| Command-Left / Command-Right | Previous / next passage during reading |
+| Command-O | Open Markdown |
+
+Single-key shortcuts leave normal typing intact when an editable text field has focus. Escape leaves the editor; Command shortcuts work while typing. Command-S starts or stops reading; it does not save a file (the draft is saved automatically). Passage navigation preserves the paused state and stays within the document. They apply only to the active Murmur window and are suspended while a sheet is open. Pace changes apply immediately and stay within 0.5×–2×. Editing the document stops the current reading.
+
 ## Local speech engines
 
 | Engine | Model / source | Voices in Murmur |
@@ -85,6 +105,9 @@ I can change `SQL = sequel` to `SQL = S Q L`, or add a phonetic spelling for a n
 
 # Run Markdown, rendering, alignment, and pronunciation tests.
 .venv/bin/python -m unittest discover -s tests -v
+
+# Check shortcut routing and typing protection.
+.venv/bin/python scripts/check_shortcuts.py
 
 # Check idle release and restart with an accelerated timeout.
 .venv/bin/python scripts/check_idle.py

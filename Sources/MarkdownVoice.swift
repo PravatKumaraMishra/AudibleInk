@@ -24,6 +24,7 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var previewHTML = "<p>Preparing preview…</p>"
     @Published var followReading = true
     @Published var showPronunciations = false
+    @Published var showShortcuts = false
     @Published var technical = true
     @Published var pronunciations = "API = A P I\nREST = rest\nJSON = jay son\nSQL = sequel\nJPA = J P A\nJVM = J V M\nHTTP = H T T P\nHTTPS = H T T P S\nURI = U R I\nURL = U R L\nCRUD = crud\nDTO = D T O\nDAO = D A O\nHATEOAS = hate ee oss\nOAuth = oh auth\nPostgreSQL = post gress Q L\nMySQL = my sequel\n@GetMapping = get mapping\n@RestController = rest controller"
     private var speechChunks: [String] = []
@@ -188,9 +189,9 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         }
     }
 
-    func start(at index: Int = 0) {
+    func start(at index: Int = 0, paused initiallyPaused: Bool = false) {
         stop()
-        error = nil; active = true; status = "Preparing your Markdown…"
+        error = nil; active = true; paused = initiallyPaused; status = "Preparing your Markdown…"
         selectedVoice = voice
         let session = generation
         UserDefaults.standard.set(pronunciations, forKey: "pronunciations")
@@ -257,6 +258,18 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
     func togglePlayback() {
         if active { togglePause() }
         else if !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { start() }
+    }
+
+    func toggleStartStop() {
+        if active { stop() }
+        else if !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { start() }
+    }
+
+    func movePassage(by offset: Int) {
+        guard active, !chunks.isEmpty else { return }
+        let target = max(0, min(chunks.count - 1, current + offset))
+        guard target != current else { return }
+        start(at: target, paused: paused)
     }
 
     func togglePause() {
@@ -395,6 +408,17 @@ struct ContentView: View {
             switch key {
             case " ": reader.togglePlayback()
             case "s": reader.stop()
+            case "startStop": reader.toggleStartStop()
+            case "escape":
+                inputFocused = false
+                NSApplication.shared.keyWindow?.makeFirstResponder(nil)
+            case "preview":
+                inputFocused = false
+                NSApplication.shared.keyWindow?.makeFirstResponder(nil)
+                reader.preview.toggle()
+            case "follow": reader.followReading.toggle()
+            case "previous": reader.movePassage(by: -1)
+            case "next": reader.movePassage(by: 1)
             case "i":
                 reader.preview = false
                 DispatchQueue.main.async { inputFocused = true }
@@ -410,6 +434,27 @@ struct ContentView: View {
         }
         .onChange(of: reader.includeCode) { reader.refreshPreview() }
         .onChange(of: reader.pronunciations) { UserDefaults.standard.set(reader.pronunciations, forKey: "pronunciations") }
+        .sheet(isPresented: $reader.showShortcuts) {
+            VStack(alignment: .leading, spacing: 20) {
+                Text("Keyboard Shortcuts").font(.system(size: 24, design: .serif))
+                Grid(alignment: .leading, horizontalSpacing: 48, verticalSpacing: 14) {
+                    shortcutRow("Start / Pause / Resume", "Space / ⌘ Return")
+                    shortcutRow("Start / Stop playback", "⌘ S")
+                    shortcutRow("Stop playback", "S")
+                    shortcutRow("Focus input", "I / ⌘ I")
+                    shortcutRow("Leave input", "Esc")
+                    shortcutRow("Decrease pace by 0.25×", "[ / ⌘ [")
+                    shortcutRow("Increase pace by 0.25×", "] / ⌘ ]")
+                    shortcutRow("Toggle Input / Preview", "⌘ P")
+                    shortcutRow("Toggle Follow reading", "⌘ F")
+                    shortcutRow("Previous / Next passage", "⌘ ← / ⌘ →")
+                    shortcutRow("Open Markdown", "⌘ O")
+                }
+                Text("Single-key shortcuts are inactive while typing. Pace ranges from 0.5× to 2×.")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+                HStack { Spacer(); Button("Done") { reader.showShortcuts = false }.keyboardShortcut(.defaultAction) }
+            }.padding(28).frame(width: 550)
+        }
         .sheet(isPresented: $reader.showPronunciations) {
             VStack(alignment: .leading, spacing: 16) {
                 Text("Say it your way").font(.system(size: 25, design: .serif))
@@ -419,9 +464,37 @@ struct ContentView: View {
             }.padding(28).frame(width: 570)
         }
     }
+    private func shortcutRow(_ title: String, _ keys: String) -> some View {
+        GridRow {
+            Text(title).font(.system(size: 13))
+            Text(keys).font(.system(size: 12, weight: .medium, design: .monospaced))
+                .padding(.horizontal, 9).padding(.vertical, 4)
+                .background(Color.black.opacity(0.06)).clipShape(RoundedRectangle(cornerRadius: 5))
+        }
+    }
 }
 
 struct PlaybackShortcuts: NSViewRepresentable {
+    static func command(for key: String, modifiers: NSEvent.ModifierFlags, editing: Bool) -> String? {
+        let modifiers = modifiers.intersection([.command, .control, .option, .shift])
+        if modifiers == .command {
+            switch key {
+            case "s": return "startStop"
+            case "i", "[", "]": return key
+            case "p": return "preview"
+            case "f": return "follow"
+            case "\u{f702}": return "previous"
+            case "\u{f703}": return "next"
+            case "\r": return " "
+            default: return nil
+            }
+        }
+        guard modifiers.isEmpty else { return nil }
+        if key == "\u{1b}" { return "escape" }
+        guard !editing, [" ", "s", "i", "[", "]"].contains(key) else { return nil }
+        return key
+    }
+
     let action: (String) -> Void
     func makeCoordinator() -> Coordinator { Coordinator(action: action) }
     func makeNSView(context: Context) -> NSView {
@@ -443,12 +516,11 @@ struct PlaybackShortcuts: NSViewRepresentable {
                 guard let self, let window = self.view?.window,
                       window.isKeyWindow, window.attachedSheet == nil,
                       event.window === window,
-                      event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
-                      let key = event.characters?.lowercased(),
-                      [" ", "s", "i", "[", "]"].contains(key) else { return event }
-                if let text = window.firstResponder as? NSTextView, text.isEditable { return event }
-                if let text = window.firstResponder as? NSTextField, text.isEditable { return event }
-                if !event.isARepeat { self.action(key) }
+                      let key = event.charactersIgnoringModifiers?.lowercased() else { return event }
+                let editing = (window.firstResponder as? NSTextView)?.isEditable == true
+                    || (window.firstResponder as? NSTextField)?.isEditable == true
+                guard let command = PlaybackShortcuts.command(for: key, modifiers: event.modifierFlags, editing: editing) else { return event }
+                if !event.isARepeat { self.action(command) }
                 return nil
             }
         }
@@ -471,6 +543,13 @@ struct PlaybackShortcuts: NSViewRepresentable {
                 }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in reader.shutdown() }
         }.windowStyle(.hiddenTitleBar).defaultSize(width: 1400, height: 900)
-        .commands { CommandGroup(replacing: .newItem) { Button("Open Markdown…", action: reader.openFile).keyboardShortcut("o") } }
+        .commands {
+            CommandGroup(replacing: .newItem) {
+                Button("Open Markdown…", action: reader.openFile).keyboardShortcut("o")
+            }
+            CommandGroup(replacing: .help) {
+                Button("Keyboard Shortcuts…") { reader.showShortcuts = true }
+            }
+        }
     }
 }
