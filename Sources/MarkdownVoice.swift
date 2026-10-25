@@ -404,6 +404,13 @@ struct ContentView: View {
     var body: some Scene {
         WindowGroup("Murmur — Markdown to Speech") {
             ContentView(reader: reader)
+                .onAppear {
+                    if let url = Bundle.main.url(forResource: "Murmur", withExtension: "icns"),
+                       let icon = NSImage(contentsOf: url) {
+                        NSApplication.shared.applicationIconImage = icon
+                        NSApplication.shared.dockTile.display()
+                    }
+                }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in reader.shutdown() }
         }.windowStyle(.hiddenTitleBar).defaultSize(width: 1120, height: 780)
         .commands { CommandGroup(replacing: .newItem) { Button("Open Markdown…", action: reader.openFile).keyboardShortcut("o") } }
