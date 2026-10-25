@@ -22,16 +22,12 @@ func render(_ size: Int) throws -> Data {
     NSGraphicsContext.restoreGraphicsState()
     ink.withAlphaComponent(0.08).setStroke(); tile.lineWidth = 2; tile.stroke()
     ink.setFill()
-    NSBezierPath(ovalIn: NSRect(x: 252, y: 346, width: 520, height: 520)).fill()
+    NSBezierPath(ovalIn: NSRect(x: 182, y: 182, width: 660, height: 660)).fill()
     paper.setFill()
-    let heights: [CGFloat] = [74, 156, 250, 182, 108, 210, 136]
+    let heights: [CGFloat] = [92, 195, 312, 227, 135, 262, 170]
     for (index, height) in heights.enumerated() {
-        NSBezierPath(roundedRect: NSRect(x: 364 + CGFloat(index) * 44, y: 606 - height / 2, width: 28, height: height), xRadius: 14, yRadius: 14).fill()
+        NSBezierPath(roundedRect: NSRect(x: 329 + CGFloat(index) * 55, y: 512 - height / 2, width: 35, height: height), xRadius: 17.5, yRadius: 17.5).fill()
     }
-    let title = "murmur" as NSString
-    let attributes: [NSAttributedString.Key: Any] = [.font: NSFont(name: "Georgia-Bold", size: 146) ?? NSFont.boldSystemFont(ofSize: 146), .foregroundColor: ink]
-    let bounds = title.size(withAttributes: attributes)
-    title.draw(at: NSPoint(x: (1024 - bounds.width) / 2, y: 170), withAttributes: attributes)
     NSGraphicsContext.restoreGraphicsState()
     return bitmap.representation(using: .png, properties: [:])!
 }

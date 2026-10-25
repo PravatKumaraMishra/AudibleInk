@@ -98,7 +98,7 @@ The speech checks write `build/kokoro-sample.wav` and `build/qwen-sample.wav`. T
 
 ### App icon
 
-I use the same dark green waveform mark and Murmur wordmark in the app and desktop icon. The icon is drawn with AppKit at each macOS icon size. To regenerate it:
+I use the dark green waveform mark for the desktop icon, with the Murmur name shown by macOS beneath it. The icon is drawn with AppKit at each macOS icon size. To regenerate it:
 
 ```sh
 mkdir -p .cache/clang
