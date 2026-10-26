@@ -33,7 +33,7 @@ harness = r'''
     }
 }
 '''
-with tempfile.TemporaryDirectory(prefix='murmur-shortcut-check-') as temp:
+with tempfile.TemporaryDirectory(prefix='audibleink-shortcut-check-') as temp:
     swift = Path(temp) / 'ShortcutCheck.swift'
     binary = Path(temp) / 'ShortcutCheck'
     swift.write_text(source + harness)

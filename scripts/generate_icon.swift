@@ -3,7 +3,7 @@ import AppKit
 // The app's sidebar mark, redrawn at each macOS icon resolution.
 let output = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "Assets"
 let destination = URL(fileURLWithPath: output, isDirectory: true)
-let iconset = destination.appendingPathComponent("Murmur.iconset", isDirectory: true)
+let iconset = destination.appendingPathComponent("AudibleInk.iconset", isDirectory: true)
 try FileManager.default.createDirectory(at: iconset, withIntermediateDirectories: true)
 
 func render(_ size: Int) throws -> Data {
@@ -37,4 +37,4 @@ for points in [16, 32, 128, 256, 512] {
         try render(points * scale).write(to: iconset.appendingPathComponent("icon_\(points)x\(points)\(suffix).png"))
     }
 }
-try render(1024).write(to: destination.appendingPathComponent("Murmur.png"))
+try render(1024).write(to: destination.appendingPathComponent("AudibleInk.png"))

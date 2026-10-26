@@ -75,13 +75,13 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
     private let idleTimeout: TimeInterval = 60
     private var lastInteraction = ProcessInfo.processInfo.systemUptime
     private var activityMonitor: Any?
-    private let audioDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("murmur-audio-\(UUID().uuidString)", isDirectory: true)
+    private let audioDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("audibleink-audio-\(UUID().uuidString)", isDirectory: true)
     private var player: AVAudioPlayer?
     private var queuedCacheFiles: [URL: URL] = [:]
     private var playingCacheFile: URL?
     private var process: Process?
     private var input: FileHandle?
-    private let writer = DispatchQueue(label: "murmur.worker-input")
+    private let writer = DispatchQueue(label: "audibleink.worker-input")
     private var callbacks: [String: ([String: Any]) -> Void] = [:]
     private var buffer = Data()
     private var generation = UUID()
@@ -213,7 +213,7 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         guard FileManager.default.isExecutableFile(atPath: python.path) else {
             throw NSError(domain: "Reader", code: 1, userInfo: [NSLocalizedDescriptionKey: "The Python runtime is missing. Run scripts/setup.sh, then scripts/build.sh."])
         }
-        let workerDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("murmur-worker-\(UUID().uuidString)", isDirectory: true)
+        let workerDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("audibleink-worker-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: workerDirectory, withIntermediateDirectories: true)
         let task = Process(), stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
         task.executableURL = python
@@ -361,7 +361,7 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
             }
             if let key = response["cache_key"] as? String,
                key.count == 64, key.allSatisfy({ "0123456789abcdef".contains($0) }) {
-                let directory = ProcessInfo.processInfo.environment["MURMUR_AUDIO_CACHE"]
+                let directory = ProcessInfo.processInfo.environment["AUDIBLEINK_AUDIO_CACHE"]
                     .map { URL(fileURLWithPath: $0, isDirectory: true) }
                     ?? FileManager.default.homeDirectoryForCurrentUser
                         .appendingPathComponent("Library/Caches/MarkdownVoice/audio", isDirectory: true)
@@ -497,7 +497,7 @@ struct ContentView: View {
                 HStack(spacing: 10) {
                     Image(systemName: "waveform.circle.fill").font(.system(size: 34)).foregroundStyle(ink)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("murmur").font(.system(size: 25, weight: .semibold, design: .serif))
+                        Text("AudibleInk").font(.system(size: 25, weight: .semibold, design: .serif))
                         Text("MARKDOWN, OUT LOUD").font(.system(size: 8, weight: .semibold)).tracking(2)
                     }
                 }.padding(.bottom, 14)
@@ -775,10 +775,10 @@ struct PlaybackShortcuts: NSViewRepresentable {
 @main struct MarkdownVoiceApp: App {
     @StateObject private var reader = Reader()
     var body: some Scene {
-        WindowGroup("Murmur — Markdown to Speech") {
+        WindowGroup("AudibleInk — Markdown to Speech") {
             ContentView(reader: reader)
                 .onAppear {
-                    if let url = Bundle.main.url(forResource: "Murmur", withExtension: "icns"),
+                    if let url = Bundle.main.url(forResource: "AudibleInk", withExtension: "icns"),
                        let icon = NSImage(contentsOf: url) {
                         NSApplication.shared.applicationIconImage = icon
                         NSApplication.shared.dockTile.display()

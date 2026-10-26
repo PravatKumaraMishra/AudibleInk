@@ -126,7 +126,7 @@ class AudioCacheTests(unittest.TestCase):
         utils.load_model = lambda name: types.SimpleNamespace(generate=generate)
         protocol = ''.join(json.dumps(dict(id=str(i), **r)) + '\n' for i, r in enumerate(requests))
         output = io.StringIO()
-        with patch.dict(os.environ, MURMUR_AUDIO_CACHE=str(self.cache.directory)):
+        with patch.dict(os.environ, AUDIBLEINK_AUDIO_CACHE=str(self.cache.directory)):
             with patch.dict(sys.modules, {'mlx': mlx, 'mlx.core': core, 'mlx_audio.tts.utils': utils}):
                 with patch('sys.stdin', io.StringIO(protocol)), patch('sys.stdout', output), patch('sys.__stdout__', output):
                     main()
@@ -164,7 +164,7 @@ class AudioCacheTests(unittest.TestCase):
     def test_worker_hit_does_not_import_model(self):
         self.cache.store(self.key, self.source)
         (self.root / 'mlx.py').write_text("raise RuntimeError('Model must not load on cache hit')\n")
-        env = dict(os.environ, MURMUR_AUDIO_CACHE=str(self.cache.directory), PYTHONPATH=str(self.root))
+        env = dict(os.environ, AUDIBLEINK_AUDIO_CACHE=str(self.cache.directory), PYTHONPATH=str(self.root))
         result = subprocess.run([sys.executable, str(Path(__file__).resolve().parents[1] / 'backend/worker.py')],
             input=json.dumps(dict(id='replay', **self.synth())) + '\n', capture_output=True, text=True, env=env, check=True)
         response = json.loads(result.stdout)

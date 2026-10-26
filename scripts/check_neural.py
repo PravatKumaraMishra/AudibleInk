@@ -14,8 +14,8 @@ start = time.monotonic()
 worker = subprocess.Popen([sys.executable, '-u', str(root / 'backend/worker.py')], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 try:
     for request in [
-        {'id': 'prepare-test', 'command': 'prepare', 'text': '# Hello\n\nWelcome to **Murmur**.'},
-        {'id': 'synth-test', 'command': 'synth', 'text': 'Welcome to Murmur. Your words stay on your Mac.', 'voice': 'af_heart', 'engine': engine, 'speed': 1.0},
+        {'id': 'prepare-test', 'command': 'prepare', 'text': '# Hello\n\nWelcome to **AudibleInk**.'},
+        {'id': 'synth-test', 'command': 'synth', 'text': 'Welcome to AudibleInk. Your words stay on your Mac.', 'voice': 'af_heart', 'engine': engine, 'speed': 1.0},
     ]:
         worker.stdin.write(json.dumps(request) + '\n'); worker.stdin.flush()
         response = json.loads(worker.stdout.readline())
@@ -30,7 +30,7 @@ try:
             shutil.copyfile(response['path'], output)
             print(f'PASS: {len(audio) / sr:.2f}s of audio, {sr}Hz. Sample: {output}')
         else:
-            assert response['chunks'] == ['Hello', 'Welcome to Murmur.']
+            assert response['chunks'] == ['Hello', 'Welcome to AudibleInk.']
             print('PASS: Markdown worker protocol')
     print(f'Total time including cold load/download: {time.monotonic() - start:.1f}s')
 finally:

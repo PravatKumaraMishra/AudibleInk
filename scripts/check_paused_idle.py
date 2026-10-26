@@ -180,7 +180,7 @@ extension Reader {
     }
 }
 '''
-with tempfile.TemporaryDirectory(prefix='murmur-paused-check-') as temp:
+with tempfile.TemporaryDirectory(prefix='audibleink-paused-check-') as temp:
     temp = Path(temp)
     swift = temp / 'PausedIdleCheck.swift'
     binary = temp / 'PausedIdleCheck'

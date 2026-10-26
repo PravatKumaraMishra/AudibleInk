@@ -14,7 +14,7 @@ source = (root / 'Sources/MarkdownVoice.swift').read_text().split('struct Conten
 # Keep test preferences separate from the user's settings and draft.
 source = source.replace('UserDefaults.standard', 'cacheTestDefaults')
 source += r'''
-let cacheTestSuite = "murmur-cache-check-\(UUID().uuidString)"
+let cacheTestSuite = "audibleink-cache-check-\(UUID().uuidString)"
 let cacheTestDefaults = UserDefaults(suiteName: cacheTestSuite)!
 extension Reader {
     var hasCachedQueue: Bool { !queue.isEmpty }
@@ -58,7 +58,7 @@ extension Reader {
     }
 }
 '''
-with tempfile.TemporaryDirectory(prefix='murmur-cache-controls-') as temp:
+with tempfile.TemporaryDirectory(prefix='audibleink-cache-controls-') as temp:
     temp = Path(temp)
     audio = temp / 'sample.wav'
     with wave.open(str(audio), 'wb') as output:
@@ -73,4 +73,4 @@ with tempfile.TemporaryDirectory(prefix='murmur-cache-controls-') as temp:
         str(root / '.cache/clang'), str(swift), '-o', str(binary), '-framework', 'SwiftUI',
         '-framework', 'AppKit', '-framework', 'AVFoundation'], check=True)
     subprocess.run([str(binary)], env={**os.environ, 'MARKDOWN_VOICE_ROOT': str(root),
-        'MURMUR_AUDIO_CACHE': str(cache.directory)}, check=True, timeout=30)
+        'AUDIBLEINK_AUDIO_CACHE': str(cache.directory)}, check=True, timeout=30)

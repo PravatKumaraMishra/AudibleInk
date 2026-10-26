@@ -29,7 +29,7 @@ DEFAULT_CACHE_BYTES = 1024 * 1024 * 1024
 
 class AudioCache:
     def __init__(self, directory=None, max_bytes=DEFAULT_CACHE_BYTES):
-        self.directory = Path(directory or os.environ.get('MURMUR_AUDIO_CACHE',
+        self.directory = Path(directory or os.environ.get('AUDIBLEINK_AUDIO_CACHE',
             str(Path.home() / 'Library/Caches/MarkdownVoice/audio')))
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.max_bytes = max_bytes

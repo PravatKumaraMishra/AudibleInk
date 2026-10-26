@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="Assets/Murmur.png" width="160" alt="Murmur waveform app icon">
+  <img src="Assets/AudibleInk.png" width="160" alt="AudibleInk waveform app icon">
 </p>
 
-# Murmur
+# AudibleInk
 
-I built Murmur to listen to Markdown notes on my Mac. I can paste a document, open a `.md` file, and follow along in a rendered preview while speech is generated locally. The interface is native SwiftUI; the neural speech models run in a Python worker through MLX.
+I built AudibleInk to listen to Markdown notes on my Mac. I can paste a document, open a `.md` file, and follow along in a rendered preview while speech is generated locally. The interface is native SwiftUI; the neural speech models run in a Python worker through MLX.
 
 ## Getting started
 
@@ -19,7 +19,7 @@ brew install uv
 
 # From the project directory:
 ./scripts/setup.sh
-open build/Murmur.app
+open build/AudibleInk.app
 ```
 
 The app is built and signed locally. It references `.venv` in this project, so I keep the project folder in place. If I move it, I run `./scripts/build.sh` again. This build is not a standalone, notarized installer.
@@ -60,17 +60,17 @@ Open **Help → Keyboard Shortcuts…** in the macOS menu bar to see the assigne
 | Option-F | Toggle full screen |
 | Command-O | Open Document |
 
-Single-key shortcuts leave normal typing intact when an editable text field has focus. Escape leaves the editor; Command shortcuts work while typing. Command-S starts or stops reading; it does not save a file (the draft is saved automatically). Passage navigation preserves the paused state and stays within the document. They apply only to the active Murmur window and are suspended while a sheet is open. Pace changes apply immediately and stay within 0.5×–2×. Editing the document stops the current reading.
+Single-key shortcuts leave normal typing intact when an editable text field has focus. Escape leaves the editor; Command shortcuts work while typing. Command-S starts or stops reading; it does not save a file (the draft is saved automatically). Passage navigation preserves the paused state and stays within the document. They apply only to the active AudibleInk window and are suspended while a sheet is open. Pace changes apply immediately and stay within 0.5×–2×. Editing the document stops the current reading.
 
 ## Local speech engines
 
-| Engine | Model / source | Voices in Murmur |
+| Engine | Model / source | Voices in AudibleInk |
 | --- | --- | --- |
 | Kokoro | `mlx-community/Kokoro-82M-bf16` | Heart, Bella, Michael, Emma, George |
 
-Kokoro is the local neural engine, with American Heart (`af_heart`) selected by default. Its [official voice catalogue](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md) lists American and British English voices and separate Hindi voices, but no dedicated Indian English voices. Murmur offers Kokoro voices only.
+Kokoro is the local neural engine, with American Heart (`af_heart`) selected by default. Its [official voice catalogue](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md) lists American and British English voices and separate Hindi voices, but no dedicated Indian English voices. AudibleInk offers Kokoro voices only.
 
-The worker loads Kokoro on demand and keeps it resident for subsequent passages. After one minute without app input while stopped or paused, Murmur terminates the worker to release its model, Python runtime, and GPU memory. Typing, clicks, dragging, and scrolling in the app reset the countdown; active playback never unloads the worker. If document preparation or synthesis is in flight, release waits for its response without restarting the countdown. Paused playback keeps its exact position, current audio, prepared next passage, and pronunciation text. Resume plays prepared audio and reloads the worker on demand for later passages, which can introduce a wait. Starting a new reading also reloads the worker and model. It generates short passages and buffers at most one future passage. Playback can wait between passages if generation falls behind. Stopping cancels playback immediately; an in-flight calculation can still finish before the next request is handled. Quitting terminates the worker.
+The worker loads Kokoro on demand and keeps it resident for subsequent passages. After one minute without app input while stopped or paused, AudibleInk terminates the worker to release its model, Python runtime, and GPU memory. Typing, clicks, dragging, and scrolling in the app reset the countdown; active playback never unloads the worker. If document preparation or synthesis is in flight, release waits for its response without restarting the countdown. Paused playback keeps its exact position, current audio, prepared next passage, and pronunciation text. Resume plays prepared audio and reloads the worker on demand for later passages, which can introduce a wait. Starting a new reading also reloads the worker and model. It generates short passages and buffers at most one future passage. Playback can wait between passages if generation falls behind. Stopping cancels playback immediately; an in-flight calculation can still finish before the next request is handled. Quitting terminates the worker.
 
 Kokoro uses `mlx-community/Kokoro-82M-bf16`. The model downloads on first use.
 
@@ -143,7 +143,7 @@ I can change `SQL = sequel` to `SQL = S Q L`, or add a phonetic spelling for a n
 .venv/bin/python scripts/check_cache_controls.py
 
 # Check the app's local signature.
-codesign --verify --deep --strict build/Murmur.app
+codesign --verify --deep --strict build/AudibleInk.app
 ```
 
 The speech check writes `build/kokoro-bf16-sample.wav` and verifies that generated audio is nonempty and non-silent. Kokoro also supports Preview highlighting in the desktop app. The test suite covers Markdown cleanup, rendered structure, speech anchors across formatting, unsafe HTML, pronunciation replacements, cache reuse, size-based eviction, private audio, and clear-cache behavior.
@@ -152,12 +152,12 @@ The speech check writes `build/kokoro-bf16-sample.wav` and verifies that generat
 
 ### App icon
 
-I use the dark green waveform mark for the desktop icon, with the Murmur name shown by macOS beneath it. The icon is drawn with AppKit at each macOS icon size. To regenerate it:
+I use the dark green waveform mark for the desktop icon, with the AudibleInk name shown by macOS beneath it. The icon is drawn with AppKit at each macOS icon size. To regenerate it:
 
 ```sh
 mkdir -p .cache/clang
 swift -module-cache-path .cache/clang scripts/generate_icon.swift Assets
-iconutil -c icns Assets/Murmur.iconset -o Assets/Murmur.icns
+iconutil -c icns Assets/AudibleInk.iconset -o Assets/AudibleInk.icns
 ./scripts/build.sh
 ```
 
@@ -190,4 +190,4 @@ I keep virtual environments, model caches, generated app bundles, audio samples,
 
 ## Dependencies and model licenses
 
-Murmur uses [MLX Audio](https://github.com/Blaizzy/mlx-audio), [Kokoro weights](https://huggingface.co/mlx-community/Kokoro-82M-bf16), [Misaki](https://github.com/hexgrad/misaki), and [markdown-it-py](https://github.com/executablebooks/markdown-it-py). Their code, models, and voice assets retain their respective licenses.
+AudibleInk uses [MLX Audio](https://github.com/Blaizzy/mlx-audio), [Kokoro weights](https://huggingface.co/mlx-community/Kokoro-82M-bf16), [Misaki](https://github.com/hexgrad/misaki), and [markdown-it-py](https://github.com/executablebooks/markdown-it-py). Their code, models, and voice assets retain their respective licenses.

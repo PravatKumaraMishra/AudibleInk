@@ -41,7 +41,7 @@ print("PASS: PDF, DOCX, DOC, RTF, Markdown, and empty document handling")
 '''
 # Swift preconditions cannot contain throwing expressions.
 harness = harness.replace('precondition(try DocumentImport.text(from: pdfURL).contains("listener"))', 'let pdfText = try DocumentImport.text(from: pdfURL)\nprecondition(pdfText.contains("listener"))').replace('precondition(try DocumentImport.text(from: markdownURL) == "# Heading")', 'let markdownText = try DocumentImport.text(from: markdownURL)\nprecondition(markdownText == "# Heading")')
-with tempfile.TemporaryDirectory(prefix='murmur-import-check-') as temp:
+with tempfile.TemporaryDirectory(prefix='audibleink-import-check-') as temp:
     swift = Path(temp) / 'main.swift'
     binary = Path(temp) / 'check'
     swift.write_text('import AppKit\nimport PDFKit\nimport CoreText\n' + extractor + harness)
