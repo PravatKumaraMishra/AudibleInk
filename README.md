@@ -26,10 +26,12 @@ The app is built and signed locally. It references `.venv` in this project, so I
 
 ## Reading a document
 
-1. Paste Markdown into **Input**, or use **Open Markdown** / Command-O to import a UTF-8 file.
+1. Paste Markdown into **Input**, or use **Open Document** / Command-O to import Markdown, UTF-8 text, PDF, Word (`.docx`, `.doc`), or RTF.
 2. Choose a voice and set the pace. **Heart · American · Kokoro** is the default.
 3. Click **Start listening**, press Command-Return, or click a passage in **Preview**.
 4. Use Pause, Resume, and Stop to control playback. I stop reading before editing the source.
+
+PDF and Word imports extract text locally using macOS frameworks, with no paid service or additional background process. Extraction runs only when opening a document; large files can take longer. Scanned PDFs need OCR elsewhere first. Formatting, code boundaries, and diagrams are not preserved in extracted text. For complex notes with code or diagrams, ask an LLM for a TTS-friendly version for a better listening experience; review sensitive content before sharing it with an external service.
 
 Preview renders headings, nested lists, emphasis, tables, quotes, and fenced code. A pale green highlight follows the current speech passage. **Follow reading** scrolls to that passage; scrolling manually turns Follow off so I can browse elsewhere.
 
@@ -55,7 +57,8 @@ Open **Help → Keyboard Shortcuts…** in the macOS menu bar to see the assigne
 | Command-P | Toggle Input / Preview |
 | Command-F | Toggle Follow reading |
 | Command-Left / Command-Right | Previous / next passage during reading |
-| Command-O | Open Markdown |
+| Option-F | Toggle full screen |
+| Command-O | Open Document |
 
 Single-key shortcuts leave normal typing intact when an editable text field has focus. Escape leaves the editor; Command shortcuts work while typing. Command-S starts or stops reading; it does not save a file (the draft is saved automatically). Passage navigation preserves the paused state and stays within the document. They apply only to the active Murmur window and are suspended while a sheet is open. Pace changes apply immediately and stay within 0.5×–2×. Editing the document stops the current reading.
 

@@ -2,11 +2,39 @@ import SwiftUI
 import AppKit
 import AVFoundation
 import UniformTypeIdentifiers
+import PDFKit
 
 struct Voice: Identifiable, Hashable {
     let id: String
     let name: String
     let detail: String
+}
+
+enum DocumentImport {
+    static func text(from url: URL) throws -> String {
+        let text: String
+        switch url.pathExtension.lowercased() {
+        case "pdf":
+            guard let document = PDFDocument(url: url), !document.isLocked else {
+                throw NSError(domain: "DocumentImport", code: 1, userInfo: [NSLocalizedDescriptionKey: "This PDF could not be opened. It may be damaged or password protected."])
+            }
+            text = (0..<document.pageCount).compactMap { document.page(at: $0)?.string }.joined(separator: "\n\n")
+        case "doc", "docx", "rtf":
+            let type: NSAttributedString.DocumentType = url.pathExtension.lowercased() == "docx" ? .officeOpenXML : (url.pathExtension.lowercased() == "doc" ? .docFormat : .rtf)
+            text = try NSAttributedString(url: url, options: [.documentType: type], documentAttributes: nil).string
+        default:
+            text = try String(contentsOf: url, encoding: .utf8)
+        }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw NSError(domain: "DocumentImport", code: 2, userInfo: [NSLocalizedDescriptionKey: "No readable text was found. Scanned PDFs need OCR before importing."])
+        }
+        // Keep extracted prose literal: document punctuation is not Markdown markup.
+        if ["pdf", "doc", "docx", "rtf"].contains(url.pathExtension.lowercased()) {
+            let markup = Set("\\`*_{}[]<>#!|~+.-")
+            return text.map { markup.contains($0) ? "\\" + String($0) : String($0) }.joined()
+        }
+        return text
+    }
 }
 
 final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
@@ -25,6 +53,7 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var followReading = true
     @Published var showPronunciations = false
     @Published var showShortcuts = false
+    @Published var showListeningTip = false
     @Published var showCacheSettings = false
     @Published var cacheLimitMB = 1024
     @Published var privateAudio = false
@@ -435,12 +464,24 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         playingCacheFile = nil
         if flag { playNext() } else { fail("Audio playback was interrupted. Try reading again.") }
     }
+    @Published var importing = false
     func openFile() {
+        guard !importing else { return }
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.plainText, UTType(filenameExtension: "md") ?? .plainText, UTType(filenameExtension: "markdown") ?? .plainText]
+        panel.allowedContentTypes = [.plainText, .pdf, .rtf] + ["md", "markdown", "doc", "docx"].compactMap { UTType(filenameExtension: $0) }
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        do { let text = try String(contentsOf: url, encoding: .utf8); stop(); markdown = text; filename = url.lastPathComponent }
-        catch { self.error = "Could not open this file as UTF-8 text: \(error.localizedDescription)" }
+        importing = true
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = Result { try DocumentImport.text(from: url) }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.importing = false
+                switch result {
+                case .success(let text): self.stop(); self.markdown = text; self.filename = url.lastPathComponent
+                case .failure(let error): self.error = "Could not import document: \(error.localizedDescription)"
+                }
+            }
+        }
     }
 }
 
@@ -463,7 +504,7 @@ struct ContentView: View {
                 Text("YOUR STUDIO").font(.system(size: 10, weight: .semibold)).tracking(2).foregroundStyle(.secondary)
                 Label("Reading room", systemImage: "book.closed").font(.system(size: 14, weight: .medium))
                     .padding(12).frame(maxWidth: .infinity, alignment: .leading).background(ink.opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 9))
-                Button(action: reader.openFile) { Label("Open Markdown", systemImage: "plus") }.buttonStyle(.plain).keyboardShortcut("o")
+                Button(action: reader.openFile) { Label("Open Document", systemImage: "plus") }.buttonStyle(.plain).keyboardShortcut("o")
                 Divider()
                 VStack(alignment: .leading, spacing: 12) {
                     Text("THE VOICE").font(.system(size: 10, weight: .semibold)).tracking(2).foregroundStyle(.secondary)
@@ -489,7 +530,11 @@ struct ContentView: View {
             }
             VStack(alignment: .leading, spacing: 0) {
                 HStack {
-                    Label(reader.filename, systemImage: "doc.text").font(.system(size: 12)).foregroundStyle(.secondary)
+                    Label(reader.filename, systemImage: "doc.text").font(.system(size: 12)).foregroundStyle(ink.opacity(0.85))
+                    listeningTipButton
+                    if reader.importing {
+                        Text("Importing document…").font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
                     Spacer()
                     Button { reader.focusDocument.toggle() } label: {
                         Image(systemName: reader.focusDocument ? "sidebar.left" : "arrow.up.left.and.arrow.down.right")
@@ -558,6 +603,7 @@ struct ContentView: View {
                 inputFocused = false
                 NSApplication.shared.keyWindow?.makeFirstResponder(nil)
                 reader.preview.toggle()
+            case "fullscreen": NSApp.keyWindow?.toggleFullScreen(nil)
             case "follow": reader.followReading.toggle()
             case "previous": reader.movePassage(by: -1)
             case "next": reader.movePassage(by: 1)
@@ -592,8 +638,9 @@ struct ContentView: View {
                     shortcutRow("Increase pace by 0.25×", "] / ⌘ ]")
                     shortcutRow("Toggle Input / Preview", "⌘ P")
                     shortcutRow("Toggle Follow reading", "⌘ F")
+                    shortcutRow("Toggle full screen", "⌥ F")
                     shortcutRow("Previous / Next passage", "⌘ ← / ⌘ →")
-                    shortcutRow("Open Markdown", "⌘ O")
+                    shortcutRow("Open Document", "⌘ O")
                 }
                 Text("Single-key shortcuts are inactive while typing. Pace ranges from 0.5× to 2×.")
                     .font(.system(size: 11)).foregroundStyle(.secondary)
@@ -641,6 +688,24 @@ struct ContentView: View {
         }.padding(28).frame(width: 540)
     }
 
+    private var listeningTipButton: some View {
+                    Button { reader.showListeningTip.toggle() } label: {
+                        Image(systemName: "info.circle").font(.system(size: 12)).foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Listening tip")
+                    .help("Listening tip")
+                    .popover(isPresented: $reader.showListeningTip) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Listening tip").font(.headline)
+                            Text("For complex notes with code or diagrams, ask an LLM for a TTS-friendly version for a better listening experience.")
+                                .font(.system(size: 12))
+                            Text("You can find keyboard shortcuts in the Help menu.")
+                                .font(.system(size: 12))
+                        }.padding(16).frame(width: 290)
+                    }
+    }
+
     private func shortcutRow(_ title: String, _ keys: String) -> some View {
         GridRow {
             Text(title).font(.system(size: 13))
@@ -654,6 +719,7 @@ struct ContentView: View {
 struct PlaybackShortcuts: NSViewRepresentable {
     static func command(for key: String, modifiers: NSEvent.ModifierFlags, editing: Bool) -> String? {
         let modifiers = modifiers.intersection([.command, .control, .option, .shift])
+        if modifiers == .option, key == "f" { return "fullscreen" }
         if modifiers == .command {
             switch key {
             case "s": return "startStop"
@@ -696,7 +762,7 @@ struct PlaybackShortcuts: NSViewRepresentable {
                       let key = event.charactersIgnoringModifiers?.lowercased() else { return event }
                 let editing = (window.firstResponder as? NSTextView)?.isEditable == true
                     || (window.firstResponder as? NSTextField)?.isEditable == true
-                guard let command = PlaybackShortcuts.command(for: key, modifiers: event.modifierFlags, editing: editing) else { return event }
+                guard let command = PlaybackShortcuts.command(for: event.keyCode == 3 && event.modifierFlags.contains(.option) ? "f" : key, modifiers: event.modifierFlags, editing: editing) else { return event }
                 if !event.isARepeat { self.action(command) }
                 return nil
             }
@@ -722,7 +788,7 @@ struct PlaybackShortcuts: NSViewRepresentable {
         }.windowStyle(.hiddenTitleBar).defaultSize(width: 1400, height: 900)
         .commands {
             CommandGroup(replacing: .newItem) {
-                Button("Open Markdown…", action: reader.openFile).keyboardShortcut("o")
+                Button("Open Document…", action: reader.openFile).keyboardShortcut("o")
             }
             CommandGroup(replacing: .help) {
                 Button("Keyboard Shortcuts…") { reader.showShortcuts = true }

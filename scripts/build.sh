@@ -3,7 +3,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="$ROOT/build/Murmur.app"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$ROOT/.cache/clang"
-swiftc -parse-as-library -swift-version 5 -O -module-cache-path "$ROOT/.cache/clang" "$ROOT/Sources/MarkdownVoice.swift" "$ROOT/Sources/MarkdownPreview.swift" -o "$APP/Contents/MacOS/Murmur" -framework SwiftUI -framework AppKit -framework AVFoundation -framework WebKit
+swiftc -parse-as-library -swift-version 5 -O -module-cache-path "$ROOT/.cache/clang" "$ROOT/Sources/MarkdownVoice.swift" "$ROOT/Sources/MarkdownPreview.swift" -o "$APP/Contents/MacOS/Murmur" -framework SwiftUI -framework AppKit -framework AVFoundation -framework WebKit -framework PDFKit
 cp "$ROOT/backend/worker.py" "$ROOT/backend/document.py" "$APP/Contents/Resources/"
 if [ -L "$APP/Contents/Resources/runtime" ]; then rm "$APP/Contents/Resources/runtime"; fi
 cp "$ROOT/Assets/Murmur.icns" "$APP/Contents/Resources/Murmur.icns"

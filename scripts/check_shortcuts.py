@@ -21,6 +21,9 @@ harness = r'''
         for editing in [true, false] {
             precondition(PlaybackShortcuts.command(for: "\u{1b}", modifiers: [], editing: editing) == "escape")
         }
+        for editing in [true, false] {
+            precondition(PlaybackShortcuts.command(for: "f", modifiers: .option, editing: editing) == "fullscreen")
+        }
         for flags: NSEvent.ModifierFlags in [.control, .option, [.command, .shift], [.command, .option]] {
             precondition(PlaybackShortcuts.command(for: "s", modifiers: flags, editing: false) == nil)
         }
@@ -34,5 +37,5 @@ with tempfile.TemporaryDirectory(prefix='murmur-shortcut-check-') as temp:
     swift = Path(temp) / 'ShortcutCheck.swift'
     binary = Path(temp) / 'ShortcutCheck'
     swift.write_text(source + harness)
-    subprocess.run(['swiftc', '-parse-as-library', '-swift-version', '5', '-module-cache-path', str(root / '.cache/clang'), str(swift), str(root / 'Sources/MarkdownPreview.swift'), '-o', str(binary), '-framework', 'SwiftUI', '-framework', 'AppKit', '-framework', 'AVFoundation', '-framework', 'WebKit'], check=True)
+    subprocess.run(['swiftc', '-parse-as-library', '-swift-version', '5', '-module-cache-path', str(root / '.cache/clang'), str(swift), str(root / 'Sources/MarkdownPreview.swift'), '-o', str(binary), '-framework', 'SwiftUI', '-framework', 'AppKit', '-framework', 'AVFoundation', '-framework', 'WebKit', '-framework', 'PDFKit'], check=True)
     subprocess.run([str(binary)], check=True, timeout=10)
