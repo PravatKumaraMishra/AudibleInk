@@ -81,7 +81,21 @@ The first use downloads model files from Hugging Face into:
 ~/Library/Caches/MarkdownVoice/huggingface
 ```
 
-After the required model and voice assets are cached, inference runs locally. Document text is not uploaded. I try the voices I need before going offline. Temporary neural WAVs are removed after loading into the player, replacing the input, or stopping. A prepared next passage is retained while paused, independently of the speech worker. Worker temporary folders are removed after process exit; app-owned audio folders are removed on completion, Stop, or normal shutdown. Crashes or forced app termination can leave temporary folders behind; the app does not sweep older sessions or model caches.
+After the required model and voice assets are cached, inference runs locally. Document text is not uploaded. I try the voices I need before going offline.
+
+### Passage audio cache
+
+Open **Audio cache…** in the sidebar to choose a maximum size: 100 MB, 250 MB, 500 MB, 1 GB (default), 2 GB, 5 GB, or 10 GB. The selected limit is saved between launches. The panel shows space used and the number of saved passages. Lowering the limit removes the least recently played WAVs immediately. **Clear Cache** stops reading, discards prepared audio, and deletes saved passage WAVs after any in-flight generation finishes. Downloaded models are kept.
+
+There is no time-based expiry. Audio stays reusable until it is evicted to fit the size limit, explicitly cleared, or removed by macOS. Successful playback and resume mark a WAV as recently used; prefetch alone does not. There is no repeating cleanup timer: storage is checked when the worker starts, the limit changes, new audio is saved, or the cache panel refreshes. A WAV larger than the chosen limit plays normally without being saved.
+
+Generated passages are saved in `~/Library/Caches/MarkdownVoice/audio`. Each WAV filename is a SHA-256 identifier covering the exact pronunciation-adjusted spoken text, voice, synthesis speed, engine, model identifier, and cache format version. Normal playback, next-passage buffering, navigation, and reopening the same Markdown all check for saved audio before calling the model. File renaming or moving does not affect reuse. Changing pronunciation or voice produces a different entry. Playback pace is applied by the player, so changing pace reuses the same normal-speed WAV. The playback status identifies **Playing saved audio** or **Playing generated audio**.
+
+**Private audio** bypasses both reading and writing the persistent audio cache. Changing it stops reading so previously prepared speech cannot carry over. Existing cached audio stays until cleared. This setting applies only to speech audio: the draft and pronunciation dictionary are still saved normally. Private playback still uses temporary WAVs, which are removed after loading into the player or stopping; crashes can leave temporary files behind.
+
+Playback always owns a separate temporary copy, so Stop, completion, navigation, and idle worker termination preserve saved WAVs. Repeated passages start faster and avoid inference work. Cached replay still starts the lightweight Python worker for document preparation and lookup, but does not load Kokoro. Corrupt entries are regenerated on demand.
+
+Tradeoffs: storage is bounded by the selected limit for persistent WAVs, while playback copies and model downloads consume additional space. Spoken content can remain locally recoverable indefinitely until eviction or clearing; hashed filenames do not encrypt it. Small text or passage-boundary changes require new audio. Updating weights at the same model identifier requires bumping `AUDIO_CACHE_VERSION` in the worker to avoid reusing older audio.
 
 ## Technical pronunciation
 
@@ -114,17 +128,22 @@ I can change `SQL = sequel` to `SQL = S Q L`, or add a phonetic spelling for a n
 
 # Check paused audio retention, idle release, resume, and in-flight races.
 .venv/bin/python scripts/check_paused_idle.py
+# On machines without an audio output device, simulate playback timing.
+.venv/bin/python scripts/check_paused_idle.py --headless
 # Optional: repeat with actual Kokoro speech and model reload.
 .venv/bin/python scripts/check_paused_idle.py --neural
 
 # Exercise real speech generation and write a sample WAV.
 .venv/bin/python scripts/check_neural.py
 
+# Check cache controls and preferences without loading the neural model.
+.venv/bin/python scripts/check_cache_controls.py
+
 # Check the app's local signature.
 codesign --verify --deep --strict build/Murmur.app
 ```
 
-The speech check writes `build/kokoro-bf16-sample.wav` and verifies that generated audio is nonempty and non-silent. Kokoro also supports Preview highlighting in the desktop app. The test suite covers Markdown cleanup, rendered structure, speech anchors across formatting, unsafe HTML, and pronunciation replacements.
+The speech check writes `build/kokoro-bf16-sample.wav` and verifies that generated audio is nonempty and non-silent. Kokoro also supports Preview highlighting in the desktop app. The test suite covers Markdown cleanup, rendered structure, speech anchors across formatting, unsafe HTML, pronunciation replacements, cache reuse, size-based eviction, private audio, and clear-cache behavior.
 
 `requirements.txt` pins the direct dependencies and compatible tokenizer helpers. `requirements.lock` records the full installed Python environment. For a complete dependency reproduction, I can install the lock file into a Python 3.11 environment with `uv pip install --python .venv/bin/python -r requirements.lock`.
 

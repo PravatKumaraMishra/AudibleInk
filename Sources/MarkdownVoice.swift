@@ -25,6 +25,15 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var followReading = true
     @Published var showPronunciations = false
     @Published var showShortcuts = false
+    @Published var showCacheSettings = false
+    @Published var cacheLimitMB = 1024
+    @Published var privateAudio = false
+    @Published var cacheBytes: Int64 = 0
+    @Published var cacheFiles = 0
+    @Published var cacheBusy = false
+    private var queuedCacheHits: [URL: Bool] = [:]
+    private var playingCacheHit = false
+    private var sessionPrivateAudio = false
     @Published var technical = true
     @Published var pronunciations = "API = A P I\nREST = rest\nJSON = jay son\nSQL = sequel\nJPA = J P A\nJVM = J V M\nHTTP = H T T P\nHTTPS = H T T P S\nURI = U R I\nURL = U R L\nCRUD = crud\nDTO = D T O\nDAO = D A O\nHATEOAS = hate ee oss\nOAuth = oh auth\nPostgreSQL = post gress Q L\nMySQL = my sequel\n@GetMapping = get mapping\n@RestController = rest controller"
     private var speechChunks: [String] = []
@@ -39,6 +48,8 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
     private var activityMonitor: Any?
     private let audioDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("murmur-audio-\(UUID().uuidString)", isDirectory: true)
     private var player: AVAudioPlayer?
+    private var queuedCacheFiles: [URL: URL] = [:]
+    private var playingCacheFile: URL?
     private var process: Process?
     private var input: FileHandle?
     private let writer = DispatchQueue(label: "murmur.worker-input")
@@ -60,6 +71,9 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         voices = list
         super.init()
         voice = "kokoro:af_heart"
+        let savedLimit = UserDefaults.standard.integer(forKey: "audioCacheLimitMB")
+        if [100, 250, 500, 1024, 2048, 5120, 10240].contains(savedLimit) { cacheLimitMB = savedLimit }
+        privateAudio = UserDefaults.standard.bool(forKey: "privateAudio")
         if let saved = UserDefaults.standard.string(forKey: "document") { markdown = saved }
         if let saved = UserDefaults.standard.string(forKey: "pronunciations") { pronunciations = saved }
         activityMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel, .leftMouseDragged, .rightMouseDragged]) { [weak self] event in
@@ -69,13 +83,57 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         refreshPreview()
     }
 
+    // Successful playback marks this WAV as recently used for size-based eviction.
+    private func recordAudioPlayback() {
+        guard let url = playingCacheFile else { return }
+        try? FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: url.path)
+    }
+
+    var cacheUsage: String {
+        ByteCountFormatter.string(fromByteCount: cacheBytes, countStyle: .file)
+    }
+
+    private var readingStatus: String {
+        playingCacheHit ? "Playing saved audio" : "Playing generated audio"
+    }
+
+    func refreshCacheInfo() {
+        cacheBusy = true
+        request(["command": "cache_info"]) { [weak self] response in
+            self?.cacheBusy = false
+            if let message = response["error"] as? String { self?.error = message }
+        }
+    }
+
+    func updateCacheLimit() {
+        UserDefaults.standard.set(cacheLimitMB, forKey: "audioCacheLimitMB")
+        refreshCacheInfo()
+    }
+
+    func updatePrivateAudio() {
+        stop()
+        UserDefaults.standard.set(privateAudio, forKey: "privateAudio")
+    }
+
+    func clearAudioCache() {
+        // The worker handles this after any in-flight synthesis, so cleared audio
+        // cannot be republished by an earlier request. Stop also discards prefetch.
+        stop()
+        cacheBusy = true
+        request(["command": "cache_clear"]) { [weak self] response in
+            guard let self else { return }
+            self.cacheBusy = false
+            if let message = response["error"] as? String { self.error = message }
+            else { self.status = "Audio cache cleared" }
+        }
+    }
+
     deinit {
         if let activityMonitor { NSEvent.removeMonitor(activityMonitor) }
         try? FileManager.default.removeItem(at: audioDirectory)
     }
 
     var wordCount: Int { markdown.split(whereSeparator: { $0.isWhitespace }).count }
-    private var engineLabel: String { "Kokoro" }
 
     // App input resets inactivity; worker replies do not extend the deadline.
     func userDidInteract() {
@@ -175,6 +233,8 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
             buffer.removeSubrange(...newline)
             guard let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
                   let id = message["id"] as? String else { continue }
+            if let bytes = message["cache_bytes"] as? NSNumber { cacheBytes = bytes.int64Value }
+            if let count = message["cache_files"] as? Int { cacheFiles = count }
             callbacks.removeValue(forKey: id)?(message)
             if callbacks.isEmpty { scheduleIdleRelease() }
         }
@@ -186,6 +246,7 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
             try launchWorker()
             let id = UUID().uuidString
             var object = payload; object["id"] = id
+            object["cache_limit_bytes"] = cacheLimitMB * 1024 * 1024
             var data = try JSONSerialization.data(withJSONObject: object); data.append(10)
             callbacks[id] = completion
             let payload = data
@@ -225,6 +286,7 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         stop()
         error = nil; active = true; paused = initiallyPaused; status = "Preparing your Markdown…"
         selectedVoice = voice
+        sessionPrivateAudio = privateAudio
         let session = generation
         UserDefaults.standard.set(pronunciations, forKey: "pronunciations")
         request(["command": "prepare", "text": markdown, "include_code": includeCode, "pronunciations": pronunciations, "technical": technical]) { [weak self] response in
@@ -247,8 +309,8 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         generating = true
         let index = nextIndex; nextIndex += 1
         let session = generation
-        if player == nil { status = "Generating speech… First use may download the model." }
-        request(["command": "synth", "text": speechChunks[index], "voice": String(selectedVoice.split(separator: ":", maxSplits: 1)[1]), "engine": "kokoro", "speed": 1.0]) { [weak self] response in
+        if player == nil { status = sessionPrivateAudio ? "Generating private audio…" : "Checking saved audio… Generating if needed." }
+        request(["command": "synth", "text": speechChunks[index], "voice": String(selectedVoice.split(separator: ":", maxSplits: 1)[1]), "engine": "kokoro", "speed": 1.0, "private": sessionPrivateAudio]) { [weak self] response in
             guard let self else { return }
             guard self.generation == session else {
                 if let path = response["path"] as? String { try? FileManager.default.removeItem(atPath: path) }
@@ -268,6 +330,15 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 try? FileManager.default.removeItem(at: source)
                 self.fail("Could not retain prepared audio: \(error.localizedDescription)"); return
             }
+            if let key = response["cache_key"] as? String,
+               key.count == 64, key.allSatisfy({ "0123456789abcdef".contains($0) }) {
+                let directory = ProcessInfo.processInfo.environment["MURMUR_AUDIO_CACHE"]
+                    .map { URL(fileURLWithPath: $0, isDirectory: true) }
+                    ?? FileManager.default.homeDirectoryForCurrentUser
+                        .appendingPathComponent("Library/Caches/MarkdownVoice/audio", isDirectory: true)
+                self.queuedCacheFiles[retained] = directory.appendingPathComponent("\(key).wav")
+            }
+            self.queuedCacheHits[retained] = response["cache_hit"] as? Bool ?? false
             self.queue.append((index, retained))
             self.playNext()
         }
@@ -280,6 +351,8 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
             return
         }
         let (index, url) = queue.removeFirst()
+        playingCacheFile = queuedCacheFiles.removeValue(forKey: url)
+        playingCacheHit = queuedCacheHits.removeValue(forKey: url) ?? false
         defer { try? FileManager.default.removeItem(at: url) }
         do {
             let audio = try AVAudioPlayer(contentsOf: url)
@@ -287,8 +360,9 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
             audio.rate = Float(speed)
             audio.delegate = self
             player = audio; current = index
-            guard audio.play() else { throw NSError(domain: "Reader", code: 2, userInfo: [NSLocalizedDescriptionKey: "Audio playback could not start."]) }
-            status = "Reading · \(engineLabel) on Apple Silicon"
+            guard audio.play() else { throw NSError(domain: "Reader", code: 2, userInfo: [NSLocalizedDescriptionKey: "Audio playback could not start. Check that an audio output device is connected and selected in System Settings → Sound."]) }
+            recordAudioPlayback()
+            status = readingStatus
             fillQueue()
         } catch { fail(error.localizedDescription) }
     }
@@ -323,8 +397,9 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
             player?.pause(); status = "Paused"
         } else {
             if let player {
-                guard player.play() else { fail("Audio playback could not resume."); return }
-                status = "Reading · \(engineLabel) on Apple Silicon"
+                guard player.play() else { fail("Audio playback could not resume. Check your audio output in System Settings → Sound."); return }
+                recordAudioPlayback()
+                status = readingStatus
                 fillQueue()
             } else { playNext() }
         }
@@ -333,6 +408,8 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
     func stop() {
         generation = UUID(); active = false; paused = false
         player?.stop(); player = nil
+        queuedCacheFiles.removeAll(); playingCacheFile = nil
+        queuedCacheHits.removeAll(); playingCacheHit = false
         for (_, url) in queue { try? FileManager.default.removeItem(at: url) }
         try? FileManager.default.removeItem(at: audioDirectory)
         queue.removeAll(); generating = false; nextIndex = 0; current = 0; chunks = []; speechChunks = []
@@ -346,7 +423,7 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         try? FileManager.default.removeItem(at: audioDirectory)
         userDidInteract()
     }
-    private func fail(_ message: String) { stop(); error = message; status = "Something needs attention" }
+    private func fail(_ message: String) { cacheBusy = false; stop(); error = message; status = "Something needs attention" }
     func shutdown() {
         stop(); releaseWorker()
         if let activityMonitor { NSEvent.removeMonitor(activityMonitor) }; activityMonitor = nil
@@ -355,6 +432,7 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         guard self.player === player else { return }
         self.player = nil
+        playingCacheFile = nil
         if flag { playNext() } else { fail("Audio playback was interrupted. Try reading again.") }
     }
     func openFile() {
@@ -400,6 +478,11 @@ struct ContentView: View {
                 }
                 Toggle("Read code blocks", isOn: $reader.includeCode).font(.system(size: 12)).toggleStyle(.checkbox)
                 Button("Pronunciation dictionary…") { reader.showPronunciations = true }.buttonStyle(.plain).font(.system(size: 12))
+                Button("Audio cache…") {
+                    reader.showCacheSettings = true
+                    reader.refreshCacheInfo()
+                }.buttonStyle(.plain).font(.system(size: 12))
+                if reader.privateAudio { Label("Private audio", systemImage: "lock").font(.system(size: 11)).foregroundStyle(.secondary) }
                 Spacer()
             }.padding(18).frame(width: 245).background(paper)
             Rectangle().fill(ink.opacity(0.1)).frame(width: 1)
@@ -493,6 +576,9 @@ struct ContentView: View {
         }
         .onChange(of: reader.includeCode) { reader.refreshPreview() }
         .onChange(of: reader.pronunciations) { UserDefaults.standard.set(reader.pronunciations, forKey: "pronunciations") }
+        .onChange(of: reader.cacheLimitMB) { reader.updateCacheLimit() }
+        .onChange(of: reader.privateAudio) { reader.updatePrivateAudio() }
+        .sheet(isPresented: $reader.showCacheSettings) { cacheSettings }
         .sheet(isPresented: $reader.showShortcuts) {
             VStack(alignment: .leading, spacing: 20) {
                 Text("Keyboard Shortcuts").font(.system(size: 24, design: .serif))
@@ -523,6 +609,38 @@ struct ContentView: View {
             }.padding(28).frame(width: 570)
         }
     }
+    private var cacheSettings: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("Audio cache").font(.system(size: 25, design: .serif))
+            Text("Reuse saved passages without generating speech again. There is no time limit; the least recently played audio is removed when storage fills up.")
+                .font(.system(size: 12)).foregroundStyle(.secondary)
+            Picker("Maximum storage", selection: $reader.cacheLimitMB) {
+                Text("100 MB").tag(100)
+                Text("250 MB").tag(250)
+                Text("500 MB").tag(500)
+                Text("1 GB").tag(1024)
+                Text("2 GB").tag(2048)
+                Text("5 GB").tag(5120)
+                Text("10 GB").tag(10240)
+            }.disabled(reader.cacheBusy)
+            HStack {
+                Text("\(reader.cacheUsage) used · \(reader.cacheFiles) saved passages")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+                Spacer()
+                if reader.cacheBusy { ProgressView().controlSize(.small) }
+                Button("Clear Cache", action: reader.clearAudioCache).disabled(reader.cacheBusy)
+            }
+            Text("Changing the limit applies immediately. Clear Cache stops reading and removes saved passage audio. Downloaded models are kept.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            Divider()
+            Toggle("Private audio — don’t read or save cached speech", isOn: $reader.privateAudio)
+                .font(.system(size: 12))
+            Text("Changing private audio stops reading. Existing cached audio stays until cleared. Your draft and pronunciation dictionary are still saved normally.")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            HStack { Spacer(); Button("Done") { reader.showCacheSettings = false }.keyboardShortcut(.defaultAction) }
+        }.padding(28).frame(width: 540)
+    }
+
     private func shortcutRow(_ title: String, _ keys: String) -> some View {
         GridRow {
             Text(title).font(.system(size: 13))
