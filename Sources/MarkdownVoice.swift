@@ -35,6 +35,9 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
     let voices: [Voice]
     private var idleWork: DispatchWorkItem?
     private let idleTimeout: TimeInterval = 60
+    private var lastInteraction = ProcessInfo.processInfo.systemUptime
+    private var activityMonitor: Any?
+    private let audioDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("murmur-audio-\(UUID().uuidString)", isDirectory: true)
     private var player: AVAudioPlayer?
     private var process: Process?
     private var input: FileHandle?
@@ -59,24 +62,46 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         voice = "kokoro:af_heart"
         if let saved = UserDefaults.standard.string(forKey: "document") { markdown = saved }
         if let saved = UserDefaults.standard.string(forKey: "pronunciations") { pronunciations = saved }
+        activityMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown, .scrollWheel, .leftMouseDragged, .rightMouseDragged]) { [weak self] event in
+            self?.userDidInteract()
+            return event
+        }
         refreshPreview()
+    }
 
+    deinit {
+        if let activityMonitor { NSEvent.removeMonitor(activityMonitor) }
+        try? FileManager.default.removeItem(at: audioDirectory)
     }
 
     var wordCount: Int { markdown.split(whereSeparator: { $0.isWhitespace }).count }
     private var engineLabel: String { "Kokoro" }
 
+    // App input resets inactivity; worker replies do not extend the deadline.
+    func userDidInteract() {
+        lastInteraction = ProcessInfo.processInfo.systemUptime
+        scheduleIdleRelease()
+    }
+
     private func scheduleIdleRelease() {
-        idleWork?.cancel()
-        guard !active else { return }
+        idleWork?.cancel(); idleWork = nil
+        guard process != nil, !active || paused else { return }
+        let remaining = max(0, idleTimeout - (ProcessInfo.processInfo.systemUptime - lastInteraction))
         let work = DispatchWorkItem { [weak self] in
-            guard let self, !self.active else { return }
+            guard let self, !self.active || self.paused else { return }
+            // Let an in-flight prepare/synthesis finish, then receive() retries using
+            // the original deadline. This preserves prepared audio and callbacks.
+            guard self.callbacks.isEmpty else { return }
             self.releaseWorker()
-            self.speechChunks.removeAll()
-            self.status = "Speech memory released · ready to reload"
+            if self.active {
+                self.status = "Paused · speech memory released"
+            } else {
+                self.speechChunks.removeAll()
+                self.status = "Speech memory released · ready to reload"
+            }
         }
         idleWork = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + idleTimeout, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + remaining, execute: work)
     }
 
     private func releaseWorker() {
@@ -101,10 +126,13 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         guard FileManager.default.isExecutableFile(atPath: python.path) else {
             throw NSError(domain: "Reader", code: 1, userInfo: [NSLocalizedDescriptionKey: "The Python runtime is missing. Run scripts/setup.sh, then scripts/build.sh."])
         }
+        let workerDirectory = FileManager.default.temporaryDirectory.appendingPathComponent("murmur-worker-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workerDirectory, withIntermediateDirectories: true)
         let task = Process(), stdin = Pipe(), stdout = Pipe(), stderr = Pipe()
         task.executableURL = python
         task.arguments = ["-u", worker.path]
         var env = ProcessInfo.processInfo.environment
+        env["TMPDIR"] = workerDirectory.path
         env["TOKENIZERS_PARALLELISM"] = "false"
         env["HF_HUB_DISABLE_XET"] = "1"
         env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -128,13 +156,15 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
             }
         }
         task.terminationHandler = { [weak self] task in
+            try? FileManager.default.removeItem(at: workerDirectory)
             DispatchQueue.main.async {
                 guard let self, self.process === task else { return }
                 self.process = nil; self.callbacks.removeAll(); self.buffer.removeAll()
                 if self.active { self.fail("Speech worker stopped. \(self.diagnostics.suffix(700))") }
             }
         }
-        try task.run()
+        do { try task.run() }
+        catch { try? FileManager.default.removeItem(at: workerDirectory); throw error }
         process = task; input = stdin.fileHandleForWriting
     }
 
@@ -173,6 +203,7 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
 
     func documentChanged() {
+        userDidInteract()
         UserDefaults.standard.set(markdown, forKey: "document")
         refreshWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.refreshPreview() }
@@ -181,6 +212,7 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
 
     func refreshPreview() {
+        userDidInteract()
         let revision = UUID(); previewRevision = revision
         request(["command": "prepare", "text": markdown, "include_code": includeCode]) { [weak self] response in
             guard let self, self.previewRevision == revision else { return }
@@ -225,7 +257,18 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
             self.generating = false
             if let error = response["error"] as? String { self.fail(error); return }
             guard let path = response["path"] as? String else { self.fail("No audio received from the model."); return }
-            self.queue.append((index, URL(fileURLWithPath: path)))
+            // Keep queued audio outside the worker's temporary directory so a
+            // paused idle release cannot invalidate a prepared passage.
+            let source = URL(fileURLWithPath: path)
+            let retained = self.audioDirectory.appendingPathComponent("\(UUID().uuidString).wav")
+            do {
+                try FileManager.default.createDirectory(at: self.audioDirectory, withIntermediateDirectories: true)
+                try FileManager.default.moveItem(at: source, to: retained)
+            } catch {
+                try? FileManager.default.removeItem(at: source)
+                self.fail("Could not retain prepared audio: \(error.localizedDescription)"); return
+            }
+            self.queue.append((index, retained))
             self.playNext()
         }
     }
@@ -237,9 +280,9 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
             return
         }
         let (index, url) = queue.removeFirst()
+        defer { try? FileManager.default.removeItem(at: url) }
         do {
             let audio = try AVAudioPlayer(contentsOf: url)
-            try? FileManager.default.removeItem(at: url)
             audio.enableRate = true
             audio.rate = Float(speed)
             audio.delegate = self
@@ -275,10 +318,15 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
     func togglePause() {
         guard active else { return }
         paused.toggle()
+        userDidInteract()
         if paused {
             player?.pause(); status = "Paused"
         } else {
-            if let player { player.play(); status = "Reading · \(engineLabel) on Apple Silicon" } else { playNext() }
+            if let player {
+                guard player.play() else { fail("Audio playback could not resume."); return }
+                status = "Reading · \(engineLabel) on Apple Silicon"
+                fillQueue()
+            } else { playNext() }
         }
     }
 
@@ -286,13 +334,24 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         generation = UUID(); active = false; paused = false
         player?.stop(); player = nil
         for (_, url) in queue { try? FileManager.default.removeItem(at: url) }
+        try? FileManager.default.removeItem(at: audioDirectory)
         queue.removeAll(); generating = false; nextIndex = 0; current = 0; chunks = []; speechChunks = []
-        scheduleIdleRelease()
+        userDidInteract()
         status = "Ready when you are"
     }
-    private func finish() { active = false; paused = false; current = chunks.count; status = "Finished. A little more clarity."; speechChunks.removeAll(); scheduleIdleRelease() }
+    private func finish() {
+        active = false; paused = false; current = chunks.count
+        status = "Finished. A little more clarity."
+        speechChunks.removeAll()
+        try? FileManager.default.removeItem(at: audioDirectory)
+        userDidInteract()
+    }
     private func fail(_ message: String) { stop(); error = message; status = "Something needs attention" }
-    func shutdown() { stop(); releaseWorker() }
+    func shutdown() {
+        stop(); releaseWorker()
+        if let activityMonitor { NSEvent.removeMonitor(activityMonitor) }; activityMonitor = nil
+        try? FileManager.default.removeItem(at: audioDirectory)
+    }
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         guard self.player === player else { return }
         self.player = nil

@@ -67,7 +67,7 @@ Single-key shortcuts leave normal typing intact when an editable text field has 
 
 Kokoro is the local neural engine, with American Heart (`af_heart`) selected by default. Its [official voice catalogue](https://huggingface.co/hexgrad/Kokoro-82M/blob/main/VOICES.md) lists American and British English voices and separate Hindi voices, but no dedicated Indian English voices. Murmur offers Kokoro voices only.
 
-The worker loads Kokoro on demand and keeps it resident for subsequent passages. After one minute without reading or document preparation, Murmur terminates the worker to release its model, Python runtime, and GPU memory. Editing resets the idle countdown. Active and paused readings are preserved. Starting again reloads the worker and model, so the first passage takes longer. It generates short passages and buffers at most one future passage. Playback can wait between passages if generation falls behind. Stopping cancels playback immediately; an in-flight calculation can still finish before the next request is handled. Quitting terminates the worker.
+The worker loads Kokoro on demand and keeps it resident for subsequent passages. After one minute without app input while stopped or paused, Murmur terminates the worker to release its model, Python runtime, and GPU memory. Typing, clicks, dragging, and scrolling in the app reset the countdown; active playback never unloads the worker. If document preparation or synthesis is in flight, release waits for its response without restarting the countdown. Paused playback keeps its exact position, current audio, prepared next passage, and pronunciation text. Resume plays prepared audio and reloads the worker on demand for later passages, which can introduce a wait. Starting a new reading also reloads the worker and model. It generates short passages and buffers at most one future passage. Playback can wait between passages if generation falls behind. Stopping cancels playback immediately; an in-flight calculation can still finish before the next request is handled. Quitting terminates the worker.
 
 Kokoro uses `mlx-community/Kokoro-82M-bf16`. The model downloads on first use.
 
@@ -81,7 +81,7 @@ The first use downloads model files from Hugging Face into:
 ~/Library/Caches/MarkdownVoice/huggingface
 ```
 
-After the required model and voice assets are cached, inference runs locally. Document text is not uploaded. I try the voices I need before going offline. Temporary neural WAV files are removed after loading, stopping, or worker exit.
+After the required model and voice assets are cached, inference runs locally. Document text is not uploaded. I try the voices I need before going offline. Temporary neural WAVs are removed after loading into the player, replacing the input, or stopping. A prepared next passage is retained while paused, independently of the speech worker. Worker temporary folders are removed after process exit; app-owned audio folders are removed on completion, Stop, or normal shutdown. Crashes or forced app termination can leave temporary folders behind; the app does not sweep older sessions or model caches.
 
 ## Technical pronunciation
 
@@ -111,6 +111,11 @@ I can change `SQL = sequel` to `SQL = S Q L`, or add a phonetic spelling for a n
 
 # Check idle release and restart with an accelerated timeout.
 .venv/bin/python scripts/check_idle.py
+
+# Check paused audio retention, idle release, resume, and in-flight races.
+.venv/bin/python scripts/check_paused_idle.py
+# Optional: repeat with actual Kokoro speech and model reload.
+.venv/bin/python scripts/check_paused_idle.py --neural
 
 # Exercise real speech generation and write a sample WAV.
 .venv/bin/python scripts/check_neural.py

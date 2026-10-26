@@ -33,7 +33,8 @@ harness = r'''
         precondition(worker(reader) != nil, "Worker did not restart")
         reader.active = true; reader.paused = true
         spin(1.0)
-        precondition(worker(reader)?.isRunning == true, "Paused reading lost worker")
+        precondition(worker(reader) == nil, "Paused idle worker retained")
+        precondition(reader.active && reader.paused, "Paused reading state lost")
         reader.stop()
         spin(1.0)
         precondition(worker(reader) == nil, "Stopped reader retained worker")
@@ -41,7 +42,7 @@ harness = r'''
         precondition(worker(reader) != nil, "Second restart failed")
         reader.shutdown()
         precondition(worker(reader) == nil, "Shutdown retained worker")
-        print("PASS: idle termination, restart, paused reading preservation, stop, shutdown")
+        print("PASS: idle termination, restart, paused state preservation, stop, shutdown")
     }
 }
 '''
