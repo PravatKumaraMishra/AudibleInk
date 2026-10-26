@@ -2,6 +2,7 @@
 
 A deterministic worker produces PCM WAVs without loading a model. --neural uses
 Kokoro instead to additionally verify model unload/reload with real speech.
+--headless simulates player timing when no audio output device is available.
 """
 from pathlib import Path
 import os
@@ -29,6 +30,47 @@ with tempfile.TemporaryDirectory(prefix='paused-check-') as temp:
             result = dict(path=path)
         print(json.dumps(dict(id=r['id'], **result)), flush=True)
 '''
+headless_player = r'''
+// Decode the real WAV with AVAudioPlayer, but simulate transport without hardware.
+final class HeadlessAudioPlayer: AVAudioPlayer {
+    private var transportRunning = false
+    private var position: TimeInterval = 0
+    private var startedAt: TimeInterval = 0
+    private var completion: Timer?
+    override var isPlaying: Bool { transportRunning }
+    override var currentTime: TimeInterval {
+        get { position + (transportRunning ? (ProcessInfo.processInfo.systemUptime - startedAt) * Double(rate) : 0) }
+        set { position = newValue; startedAt = ProcessInfo.processInfo.systemUptime }
+    }
+    override func play() -> Bool {
+        guard !transportRunning else { return true }
+        transportRunning = true
+        startedAt = ProcessInfo.processInfo.systemUptime
+        completion?.invalidate()
+        completion = Timer.scheduledTimer(withTimeInterval: max(0.01, (duration - position) / Double(rate)), repeats: false) { [weak self] _ in
+            guard let self else { return }
+            self.position = self.duration
+            self.transportRunning = false
+            self.delegate?.audioPlayerDidFinishPlaying?(self, successfully: true)
+        }
+        return true
+    }
+    override func pause() {
+        position = currentTime
+        transportRunning = false
+        completion?.invalidate()
+    }
+    override func stop() {
+        transportRunning = false
+        position = 0
+        completion?.invalidate()
+    }
+}
+'''
+if '--headless' in sys.argv:
+    source = source.replace('try AVAudioPlayer(contentsOf: url)', 'try HeadlessAudioPlayer(contentsOf: url)')
+    source += headless_player
+
 harness = r'''
 extension Reader {
     // Same-file access exposes observations only; all transitions use Reader methods.
@@ -70,6 +112,7 @@ extension Reader {
         precondition(reader.chunks == chunks && reader.checkedSpeech == speech)
         precondition(try! Data(contentsOf: prepared) == bytes, "Queued audio changed/deleted")
         reader.togglePause()
+        if let error = reader.error { fatalError("Resume failed: \(error)") }
         wait("Prepared passage did not resume") { reader.checkedPlayer?.isPlaying == true }
         let player = reader.checkedPlayer!
         player.volume = 0
