@@ -7,7 +7,11 @@ swiftc -parse-as-library -swift-version 5 -O -module-cache-path "$ROOT/.cache/cl
 cp "$ROOT/backend/worker.py" "$ROOT/backend/document.py" "$APP/Contents/Resources/"
 if [ -L "$APP/Contents/Resources/runtime" ]; then rm "$APP/Contents/Resources/runtime"; fi
 cp "$ROOT/Assets/AudibleInk.icns" "$APP/Contents/Resources/AudibleInk.icns"
-printf '%s\n' "$ROOT/.venv/bin/python" > "$APP/Contents/Resources/runtime-path.txt"
+if [ -x "$APP/Contents/Resources/python/bin/python3.11" ]; then
+  rm -f "$APP/Contents/Resources/runtime-path.txt"
+else
+  printf '%s\n' "$ROOT/.venv/bin/python" > "$APP/Contents/Resources/runtime-path.txt"
+fi
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -18,8 +22,8 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
 <key>CFBundleDisplayName</key><string>AudibleInk</string>
 <key>CFBundleIconFile</key><string>AudibleInk.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>1.1.2</string>
-<key>CFBundleVersion</key><string>4</string>
+<key>CFBundleShortVersionString</key><string>1.2.0</string>
+<key>CFBundleVersion</key><string>5</string>
 <key>LSMinimumSystemVersion</key><string>14.0</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

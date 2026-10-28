@@ -399,7 +399,8 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         let resources = Bundle.main.resourceURL!
         let root = ProcessInfo.processInfo.environment["MARKDOWN_VOICE_ROOT"].map { URL(fileURLWithPath: $0) }
         let configuredPath = (try? String(contentsOf: resources.appendingPathComponent("runtime-path.txt"), encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let python = root?.appendingPathComponent(".venv/bin/python") ?? URL(fileURLWithPath: configuredPath ?? "")
+        let bundledPython = resources.appendingPathComponent("python/bin/python3.11")
+        let python = root?.appendingPathComponent(".venv/bin/python") ?? (FileManager.default.isExecutableFile(atPath: bundledPython.path) ? bundledPython : URL(fileURLWithPath: configuredPath ?? ""))
         let worker = root?.appendingPathComponent("backend/worker.py") ?? resources.appendingPathComponent("worker.py")
         guard FileManager.default.isExecutableFile(atPath: python.path) else {
             throw NSError(domain: "Reader", code: 1, userInfo: [NSLocalizedDescriptionKey: "The Python runtime is missing. Run scripts/setup.sh, then scripts/build.sh."])
