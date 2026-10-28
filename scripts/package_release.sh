@@ -9,10 +9,12 @@ uv python install 3.11.17
 PYTHON="$(uv python find --managed-python 3.11.17)"
 APP="$ROOT/build/AudibleInk.app"
 RUNTIME="$APP/Contents/Resources/python"
+# Start from an allowlisted build, never an existing app or a user profile.
+rm -rf "$APP"
 mkdir -p "$APP/Contents/Resources"
-rm -rf "$RUNTIME"
 cp -R "$(dirname "$(dirname "$PYTHON")")" "$RUNTIME"
-uv pip install --python "$RUNTIME/bin/python3.11" --target "$RUNTIME/lib/python3.11/site-packages" -r requirements.lock
+uv pip install --python "$RUNTIME/bin/python3.11" --target "$RUNTIME/lib/python3.11/site-packages" -r backend/requirements/base.lock
+printf '%s\n' '{"version": 1, "dependencies": "on-first-use"}' > "$RUNTIME/audibleink-runtime.json"
 # Drop bytecode and development payloads, retaining package data and licenses.
 find "$RUNTIME" -type d -name __pycache__ -prune -exec rm -rf {} +
 rm -rf "$RUNTIME/lib/python3.11/test" "$RUNTIME/lib/python3.11/idlelib"
