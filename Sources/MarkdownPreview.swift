@@ -64,6 +64,16 @@ struct MarkdownPreview: NSViewRepresentable {
         .passage:hover { background:#e9eee1; } .passage.current { background:#e0ebc6; box-shadow:0 2px 0 #a0b87e; }
         ::selection { background:#cddfb6; } .hint { font-size:12px; color:#6e7e70; padding-bottom:16px; border-bottom:1px solid #e5e8de; margin-bottom:24px; }
         #selectionPlay { display:none; position:fixed; bottom:18px; right:20px; border:0; border-radius:20px; padding:12px 18px; color:white; background:#293b35; box-shadow:0 3px 15px #0002; cursor:pointer; }
+        @media (prefers-color-scheme: dark) {
+          :root { color-scheme: dark; }
+          body { color:#e1e6e0; background:#202420; }
+          h1,h2,h3,h4,h5,h6 { color:#e6eee3; border-color:#485044; }
+          code, pre, th { background:#30382e; color:#e1e6e0; border-color:#485044; }
+          blockquote { color:#c1cdbd; background:#293026; }
+          td,th,hr { border-color:#485044; } a { color:#afd09e; }
+          .passage:hover { background:#364331; }
+          .passage.current { background:#435637; box-shadow:0 2px 0 #7d9b66; }
+        }
         </style></head><body>
         <main>
         """# + body + #"""
