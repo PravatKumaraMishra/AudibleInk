@@ -12,7 +12,8 @@ import tempfile
 import traceback
 
 MODEL = 'mlx-community/Kokoro-82M-bf16'
-VOICES = {'af_heart', 'af_bella', 'am_adam', 'am_michael', 'bf_emma', 'bm_george'}
+MODELS = {'kokoro': MODEL, 'soprano': 'mlx-community/Soprano-80M-bf16', 'svara': 'mlx-community/svara-tts-v1-4bit', 'indicf5': 'ai4bharat/IndicF5'}
+VOICES = {'af_heart', 'af_bella', 'am_adam', 'am_michael', 'bf_emma', 'bm_george', 'hf_alpha', 'hm_omega'}
 
 
 from document import prepare_document, pronunciation_text
@@ -36,7 +37,7 @@ class AudioCache:
         self.entries = None
 
     def key(self, text, voice, speed, engine='kokoro'):
-        settings = [AUDIO_CACHE_VERSION, MODEL, engine, voice, float(speed), text]
+        settings = [AUDIO_CACHE_VERSION, MODELS[engine], engine, voice, float(speed), text]
         return hashlib.sha256(json.dumps(settings, ensure_ascii=False,
             separators=(',', ':')).encode('utf-8')).hexdigest()
 
@@ -120,8 +121,64 @@ class AudioCache:
             Path(staging).unlink(missing_ok=True)
 
 
+def hub_directory():
+    return Path(os.environ.get('HF_HUB_CACHE') or os.environ.get('HUGGINGFACE_HUB_CACHE') or str(Path(os.environ.get('HF_HOME', str(Path.home() / 'Library/Caches/MarkdownVoice/huggingface'))) / 'hub'))
+
+
+def model_repositories(engine):
+    if engine == 'kokoro':
+        return ('models--mlx-community--Kokoro-82M-bf16', 'models--hexgrad--Kokoro-82M', 'models--prince-canuma--Kokoro-82M')
+    if engine == 'indicf5':
+        return ('models--ai4bharat--IndicF5', 'models--lucasnewman--vocos-mel-24khz')
+    return ('models--' + MODELS[engine].replace('/', '--'),)
+
+
+def model_storage():
+    usage = {}
+    for engine in MODELS:
+        size = 0
+        for repository in model_repositories(engine):
+            directory = hub_directory() / repository
+            if directory.is_symlink():
+                continue
+            for path in directory.rglob('*'):
+                if path.is_file() and not path.is_symlink():
+                    size += path.stat().st_size
+        if size:
+            usage[engine] = size
+    return usage
+
+
+def prepare_reference(source, destination):
+    import math
+    import numpy as np
+    import soundfile as sf
+    from scipy.signal import resample_poly
+    samples, rate = sf.read(source, always_2d=True)
+    if not len(samples):
+        raise ValueError('The reference clip is empty')
+    mono = samples.mean(axis=1)
+    if rate != 24000:
+        divisor = math.gcd(rate, 24000)
+        mono = resample_poly(mono, 24000 // divisor, rate // divisor)
+    if not np.isfinite(mono).all() or np.max(np.abs(mono)) < 1e-6:
+        raise ValueError('The reference clip contains no usable audio')
+    sf.write(destination, mono, 24000, subtype='PCM_16')
+    return str(destination)
+
+
+def reference_identity(request):
+    path = Path(request.get('reference_audio', ''))
+    transcript = request.get('reference_text', '').strip()
+    if not path.is_file() or not transcript:
+        raise ValueError('IndicF5 needs a reference audio clip and its exact transcript. Add a voice in Settings.')
+    # Both clip contents and transcript affect synthesized audio.
+    return hashlib.sha256(path.read_bytes() + transcript.encode('utf-8')).hexdigest()
+
+
 def main():
     model = None
+    model_engine = None
     cache = AudioCache()
     with tempfile.TemporaryDirectory(prefix='markdown-voice-') as temp:
         for line in sys.stdin:
@@ -130,25 +187,69 @@ def main():
                 rid = request['id']
                 cache.configure(request.get('cache_limit_bytes', cache.max_bytes))
                 with contextlib.redirect_stdout(sys.stderr):
-                    if request['command'] == 'cache_info':
+                    if request['command'] == 'model_info':
+                        result = {'model_bytes': model_storage()}
+                    elif request['command'] == 'cache_info':
                         cache.scan()
                         result = {}
                     elif request['command'] == 'cache_clear':
                         cache.clear()
+                        result = {}
+                    elif request['command'] == 'delete_voice':
+                        if request.get('engine') != 'kokoro' or request.get('voice') not in VOICES:
+                            raise ValueError('Unknown downloadable voice')
+                        model = None
+                        model_engine = None
+                        import gc
+                        gc.collect()
+                        hub = Path(os.environ.get('HF_HUB_CACHE') or os.environ.get('HUGGINGFACE_HUB_CACHE') or str(Path(os.environ.get('HF_HOME', str(Path.home() / 'Library/Caches/MarkdownVoice/huggingface'))) / 'hub'))
+                        removed = 0
+                        for repository in ('models--mlx-community--Kokoro-82M-bf16', 'models--hexgrad--Kokoro-82M', 'models--prince-canuma--Kokoro-82M'):
+                            directory = hub / repository
+                            for extension in ('safetensors', 'pt'):
+                                for voice_file in directory.glob(f"snapshots/*/voices/{request['voice']}.{extension}"):
+                                    target = voice_file.resolve()
+                                    if voice_file.is_symlink() and target.is_relative_to((directory / 'blobs').resolve()):
+                                        target.unlink(missing_ok=True)
+                                    voice_file.unlink(missing_ok=True)
+                                    removed += 1
+                        result = {'removed_voice_files': removed}
+                    elif request['command'] == 'delete_model':
+                        engine = request.get('engine', 'kokoro')
+                        if engine not in MODELS:
+                            raise ValueError('Unknown model')
+                        model = None
+                        model_engine = None
+                        import gc
+                        gc.collect()
+                        # Delete only known Kokoro repositories, never the whole hub.
+                        hub = Path(os.environ.get('HF_HUB_CACHE') or os.environ.get('HUGGINGFACE_HUB_CACHE') or str(Path(os.environ.get('HF_HOME', str(Path.home() / 'Library/Caches/MarkdownVoice/huggingface'))) / 'hub'))
+                        repositories = model_repositories(engine)
+                        for repository in repositories:
+                            directory = hub / repository
+                            if directory.is_symlink():
+                                directory.unlink()
+                            elif directory.exists():
+                                shutil.rmtree(directory)
                         result = {}
                     elif request['command'] == 'prepare':
                         result = prepare_document(request['text'], request.get('include_code', False))
                         result['speech_chunks'] = [pronunciation_text(c, request.get('pronunciations', ''), request.get('technical', True)) for c in result['chunks']]
                     elif request['command'] == 'synth':
                         engine = request.get('engine', 'kokoro')
-                        if engine != 'kokoro':
+                        if engine not in tuple(MODELS):
                             raise ValueError('Unknown engine')
-                        if request['voice'] not in VOICES:
+                        if engine == 'kokoro' and request['voice'] not in VOICES:
                             raise ValueError('Unknown voice')
+                        if engine == 'svara' and request['voice'] not in {f'{language} ({gender})' for language in ('Hindi', 'Bengali', 'English (Indian)', 'Marathi', 'Telugu', 'Kannada', 'Tamil', 'Malayalam', 'Gujarati', 'Punjabi', 'Assamese', 'Bhojpuri', 'Magahi', 'Maithili', 'Chhattisgarhi', 'Bodo', 'Dogri', 'Nepali', 'Sanskrit') for gender in ('Female', 'Male')}:
+                            raise ValueError('Unknown Svara voice')
                         speed = float(request['speed'])
                         if not 0.5 <= speed <= 2:
                             raise ValueError('Speed must be between 0.5 and 2')
-                        key = cache.key(request['text'], request['voice'], speed, engine)
+                        voice_key = request['voice']
+                        if engine == 'indicf5':
+                            voice_key += reference_identity(request)
+                        key = cache.key(request['text'], voice_key, speed, engine)
                         # Do this before importing/loading the neural model.
                         path = str(Path(temp) / f'{os.urandom(16).hex()}.wav')
                         private = request.get('private', False)
@@ -158,17 +259,39 @@ def main():
                             continue
                         import numpy as np
                         import soundfile as sf
-                        if model is None:
+                        if model is None or model_engine != engine:
                             import gc
                             import mlx.core as mx
-                            from mlx_audio.tts.utils import load_model
                             model = None
                             gc.collect()
                             mx.clear_cache()
-                            model = load_model(MODEL)
+                            if engine == 'indicf5':
+                                try:
+                                    from indic_f5_mlx import load_indicf5
+                                except ImportError as exc:
+                                    raise RuntimeError('Install IndicF5-MLX with scripts/setup.sh, accept access at huggingface.co/ai4bharat/IndicF5, and run hf auth login.') from exc
+                                try:
+                                    model = load_indicf5()[0]
+                                except Exception as exc:
+                                    raise RuntimeError('IndicF5 could not load. Accept access at huggingface.co/ai4bharat/IndicF5 and run hf auth login using this project runtime. ' + str(exc)) from exc
+                            else:
+                                from mlx_audio.tts.utils import load_model
+                                model = load_model(MODELS[engine])
+                            model_engine = engine
                         audio = []
                         sample_rate = 24000
-                        results = model.generate(request['text'], voice=request['voice'], speed=speed, lang_code=request['voice'][0])
+                        if engine == 'indicf5':
+                            from indic_f5_mlx import generate
+                            reference_path = prepare_reference(request['reference_audio'], Path(temp) / 'reference.wav')
+                            samples = generate(model, ref_audio_path=reference_path, ref_text=request['reference_text'], text=request['text'], steps=16)
+                            from types import SimpleNamespace
+                            results = [SimpleNamespace(audio=samples, sample_rate=24000)]
+                        elif engine == 'kokoro':
+                            results = model.generate(request['text'], voice=request['voice'], speed=speed, lang_code=request['voice'][0])
+                        elif engine == 'svara':
+                            results = model.generate(request['text'], voice=request['voice'], temperature=0.75, top_p=0.9, top_k=40, repetition_penalty=1.1, max_tokens=2048)
+                        else:
+                            results = model.generate(request['text'])
                         for part in results:
                             audio.append(np.asarray(part.audio).reshape(-1))
                             sample_rate = part.sample_rate

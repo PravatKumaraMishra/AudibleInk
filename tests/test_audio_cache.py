@@ -161,6 +161,53 @@ class AudioCacheTests(unittest.TestCase):
         self.assertEqual(responses[3]['cache_bytes'], 0)
         self.assertEqual(responses[4]['cache_bytes'], 0)
 
+    def test_switching_neural_engines_keeps_audio_cache_separate(self):
+        requests = [self.synth(), dict(command='synth', text='Hello', voice='default', engine='soprano', speed=1), self.synth()]
+        responses, calls = self.run_requests(requests)
+        self.assertEqual(calls, ['Hello', 'Hello'])
+        self.assertEqual([r['cache_hit'] for r in responses], [False, False, True])
+        self.assertNotEqual(responses[0]['cache_key'], responses[1]['cache_key'])
+
+    def test_delete_model_preserves_unrelated_repositories_and_audio(self):
+        hub = self.root / 'huggingface' / 'hub'
+        repositories = ['models--mlx-community--Kokoro-82M-bf16',
+                        'models--hexgrad--Kokoro-82M', 'models--prince-canuma--Kokoro-82M']
+        for name in repositories + ['models--unrelated--keep']:
+            (hub / name).mkdir(parents=True)
+            (hub / name / 'weights').write_text('fixture')
+        self.cache.store(self.key, self.source)
+        with patch.dict(os.environ, HF_HOME=str(hub.parent)):
+            self.run_requests([dict(command='delete_model')])
+        for name in repositories:
+            self.assertFalse((hub / name).exists())
+        self.assertTrue((hub / 'models--unrelated--keep' / 'weights').exists())
+        self.assertTrue((self.cache.directory / f'{self.key}.wav').exists())
+
+    def test_delete_voice_keeps_model_and_other_voices(self):
+        hub = self.root / 'huggingface' / 'hub'
+        repository = hub / 'models--prince-canuma--Kokoro-82M'
+        voices = repository / 'snapshots' / 'revision' / 'voices'
+        voices.mkdir(parents=True)
+        blobs = repository / 'blobs'
+        blobs.mkdir()
+        (blobs / 'heart').write_bytes(b'voice')
+        (voices / 'af_heart.safetensors').symlink_to(blobs / 'heart')
+        (voices / 'af_bella.safetensors').write_bytes(b'keep')
+        (repository / 'weights').write_bytes(b'keep')
+        with patch.dict(os.environ, HF_HOME=str(hub.parent)):
+            self.run_requests([dict(command='delete_voice', engine='kokoro', voice='af_heart')])
+        self.assertFalse((blobs / 'heart').exists())
+        self.assertFalse((voices / 'af_heart.safetensors').exists())
+        self.assertTrue((voices / 'af_bella.safetensors').exists())
+        self.assertTrue((repository / 'weights').exists())
+
+    def test_svara_voice_and_cache_routing(self):
+        request = dict(command='synth', text='নমস্কার', voice='Bengali (Female)', engine='svara', speed=1)
+        responses, calls = self.run_requests([request, request])
+        self.assertEqual([r['cache_hit'] for r in responses], [False, True])
+        self.assertEqual(calls, ['নমস্কার'])
+        self.assertNotEqual(self.cache.key('Hello', 'default', 1, 'svara'), self.cache.key('Hello', 'default', 1))
+
     def test_worker_hit_does_not_import_model(self):
         self.cache.store(self.key, self.source)
         (self.root / 'mlx.py').write_text("raise RuntimeError('Model must not load on cache hit')\n")
