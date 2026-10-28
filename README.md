@@ -12,7 +12,11 @@ Requires an **Apple Silicon Mac with macOS 14 or later**.
 
 1. Download the DMG from [GitHub Releases](https://github.com/PravatKumaraMishra/AudibleInk/releases/latest).
 2. Open it and drag **AudibleInk** into **Applications**. A ZIP is also available.
-3. Open AudibleInk. This release is ad-hoc signed, without Apple Developer ID or notarization. If macOS blocks opening it, attempt to launch once, then use **System Settings → Privacy & Security → Open Anyway** if you trust the download.
+3. Open AudibleInk.
+
+**If macOS blocks the app:** this release is ad-hoc signed, without Apple Developer ID or notarization. After attempting to open it, go to **System Settings → Privacy & Security**, find the message about AudibleInk, and click **Open Anyway**. Complete any confirmation macOS requests. Only allow the app if you trust the download.
+
+Alternatively, [build the app yourself from source](#build-from-source) using the instructions below.
 
 The installer includes Python and the small Markdown preview libraries. **Each speech engine installs its own dependencies and downloads its weights on first use.** Internet is required the first time you use each engine; no developer tools or project folder are needed. Later speech runs locally.
 
@@ -54,11 +58,13 @@ Models are stored in `~/Library/Caches/MarkdownVoice/huggingface`. Delete downlo
 
 Passage audio is cached in `~/Library/Caches/MarkdownVoice/audio` with a configurable limit. **Private audio** bypasses the persistent audio cache; drafts and preferences are still saved. Use **Clear Cache** to remove existing audio. The speech worker exits after a minute of stopped or paused inactivity and reloads when needed.
 
-## Development
+## Build from source
 
 Install Apple's Command Line Tools and [uv](https://docs.astral.sh/uv/), then run:
 
 ```sh
+git clone https://github.com/PravatKumaraMishra/AudibleInk.git
+cd AudibleInk
 ./scripts/setup.sh
 open build/AudibleInk.app
 ```
