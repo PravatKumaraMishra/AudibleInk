@@ -11,7 +11,7 @@ import sys
 import tempfile
 
 root = Path(__file__).resolve().parents[1]
-source = (root / 'Sources/MarkdownVoice.swift').read_text().split('struct ContentView: View {')[0]
+source = (root / 'Sources/MarkdownVoice.swift').read_text().split('@main struct MarkdownVoiceApp:')[0]
 source = source.replace('private let idleTimeout: TimeInterval = 60', 'private let idleTimeout: TimeInterval = 0.6')
 fixture = r'''
 import json, os, sys, tempfile, time, wave, math, struct
@@ -185,7 +185,7 @@ with tempfile.TemporaryDirectory(prefix='audibleink-paused-check-') as temp:
     swift = temp / 'PausedIdleCheck.swift'
     binary = temp / 'PausedIdleCheck'
     swift.write_text(source + harness)
-    subprocess.run(['swiftc', '-parse-as-library', '-swift-version', '5', '-module-cache-path', str(root / '.cache/clang'), str(swift), '-o', str(binary), '-framework', 'SwiftUI', '-framework', 'AppKit', '-framework', 'AVFoundation'], check=True)
+    subprocess.run(['swiftc', '-parse-as-library', '-swift-version', '5', '-module-cache-path', str(root / '.cache/clang'), str(swift), str(root / 'Sources/MarkdownPreview.swift'), '-o', str(binary), '-framework', 'SwiftUI', '-framework', 'AppKit', '-framework', 'AVFoundation', '-framework', 'WebKit', '-framework', 'PDFKit'], check=True)
     worker_root = root
     if '--neural' not in sys.argv:
         worker_root = temp / 'fixture'

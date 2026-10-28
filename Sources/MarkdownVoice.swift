@@ -10,6 +10,25 @@ struct Voice: Identifiable, Hashable {
     let detail: String
 }
 
+struct ReferenceVoice: Codable, Identifiable {
+    var id: String = UUID().uuidString
+    var name: String
+    var path: String
+    var transcript: String
+}
+
+struct SpeechModel: Identifiable {
+    let id: String
+    let name: String
+    let resources: String
+    static let all = [
+        SpeechModel(id: "kokoro", name: "Kokoro", resources: "Download ≈ 350 MB · working RAM ≈ 1–2 GB"),
+        SpeechModel(id: "soprano", name: "Soprano 80M", resources: "Download ≈ 200 MB · working RAM ≈ 1–2 GB"),
+        SpeechModel(id: "svara", name: "Svara v1 · 4-bit", resources: "Download ≈ 2 GB + shared decoder · working RAM ≈ 3–6 GB"),
+        SpeechModel(id: "indicf5", name: "IndicF5-MLX", resources: "Allow ≈ 5 GB storage for weights/conversion · working RAM ≈ 4–8 GB")
+    ]
+}
+
 enum DocumentImport {
     static func text(from url: URL) throws -> String {
         let text: String
@@ -37,9 +56,136 @@ enum DocumentImport {
     }
 }
 
+struct RecentDocument: Codable, Identifiable {
+    var id: String
+    var title: String
+    var path: String?
+    var text: String?
+}
+
 final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var markdown = "# A little space to listen\n\nPaste your Markdown here, or open a file. Turn your notes, articles, and ideas into a voice you can take your time with.\n\n## Made for your Mac\n\nListen with Heart or choose another Kokoro voice for local neural speech.\n\n- Your words stay on this machine.\n- Links and formatting become clean, readable speech.\n- Code blocks are skipped unless you include them."
     @Published var voice = ""
+    @Published var showSettings = false
+    @Published var settingsTab = "general"
+    @Published var floating = false
+    @Published var alwaysOnTop = UserDefaults.standard.bool(forKey: "alwaysOnTop") {
+        didSet { UserDefaults.standard.set(alwaysOnTop, forKey: "alwaysOnTop"); floatingWindow?.level = alwaysOnTop ? .floating : .normal }
+    }
+    @Published var recentDocuments: [RecentDocument] = []
+    private var currentDocumentID = UserDefaults.standard.string(forKey: "currentDocumentID")
+    @Published var renamingDocumentID: String?
+    @Published var renameText = ""
+    @Published var uiMode = UserDefaults.standard.string(forKey: "uiMode") ?? "system" {
+        didSet { UserDefaults.standard.set(uiMode, forKey: "uiMode"); applyAppearance() }
+    }
+    func applyAppearance() {
+        guard let application = NSApp else { return }
+        application.appearance = uiMode == "dark" ? NSAppearance(named: .darkAqua) : (uiMode == "light" ? NSAppearance(named: .aqua) : nil)
+    }
+    private var loadingDocument = false
+    private var nextUntitled = max(1, UserDefaults.standard.integer(forKey: "nextUntitled"))
+
+    private func saveRecents() {
+        if let data = try? JSONEncoder().encode(recentDocuments) { UserDefaults.standard.set(data, forKey: "recentDocuments") }
+        UserDefaults.standard.set(currentDocumentID, forKey: "currentDocumentID")
+        UserDefaults.standard.set(filename, forKey: "filename")
+    }
+    func newDraft() {
+        saveDraft()
+        stop(); currentDocumentID = nil; markdown = ""; filename = "New document"
+        UserDefaults.standard.set(markdown, forKey: "document")
+        saveRecents()
+        preview = false
+        NotificationCenter.default.post(name: .init("FocusInput"), object: nil)
+    }
+    func beginPaste(replacingDocument: Bool) {
+        if replacingDocument {
+            saveDraft()
+            currentDocumentID = nil
+        }
+    }
+    func saveDraft() {
+        guard !loadingDocument, !markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if let index = recentDocuments.firstIndex(where: { $0.id == currentDocumentID }) {
+            if recentDocuments[index].text == markdown { return }
+            if recentDocuments[index].path == nil {
+                recentDocuments[index].text = markdown
+                saveRecents(); return
+            }
+            // An edited import becomes a separate draft; the file stays untouched.
+        }
+        let title = "Untitled \(nextUntitled)"
+        nextUntitled += 1
+        UserDefaults.standard.set(nextUntitled, forKey: "nextUntitled")
+        let document = RecentDocument(id: UUID().uuidString, title: title, text: markdown)
+        recentDocuments.insert(document, at: 0)
+        currentDocumentID = document.id; filename = title
+        saveRecents()
+    }
+    func openRecent(_ document: RecentDocument) {
+        saveDraft()
+        if let path = document.path { openDocument(URL(fileURLWithPath: path)); return }
+        stop(); loadingDocument = true
+        currentDocumentID = document.id; markdown = document.text ?? ""; filename = document.title
+        UserDefaults.standard.set(markdown, forKey: "document")
+        recentDocuments.removeAll { $0.id == document.id }; recentDocuments.insert(document, at: 0)
+        saveRecents(); refreshPreview()
+        DispatchQueue.main.async { self.loadingDocument = false }
+    }
+    func renameRecent(_ document: RecentDocument) {
+        renamingDocumentID = document.id; renameText = document.title
+    }
+    func finishRename() {
+        defer { renamingDocumentID = nil }
+        let title = renameText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, let index = recentDocuments.firstIndex(where: { $0.id == renamingDocumentID }) else { return }
+        recentDocuments[index].title = title
+        if currentDocumentID == renamingDocumentID { filename = title }
+        saveRecents()
+    }
+    @Published var shortcuts = ShortcutBinding.load() {
+        didSet { if let data = try? JSONEncoder().encode(shortcuts) { UserDefaults.standard.set(data, forKey: "shortcuts") } }
+    }
+    weak var mainWindow: NSWindow?
+    private var floatingWindow: NSWindow?
+    func openSettings(_ tab: String = "general") { settingsTab = tab; showSettings = true }
+    func toggleFloating() {
+        if floating {
+            floatingWindow?.orderOut(nil); mainWindow?.makeKeyAndOrderFront(nil); floating = false
+        } else {
+            if floatingWindow == nil {
+                let window = NSPanel(contentRect: NSRect(x: 150, y: 150, width: 440, height: 210), styleMask: [.titled, .closable, .resizable, .utilityWindow], backing: .buffered, defer: false)
+                window.title = "AudibleInk Player"
+                window.minSize = NSSize(width: 440, height: 210)
+                window.isReleasedWhenClosed = false
+                window.hidesOnDeactivate = false
+                window.contentView = NSHostingView(rootView: FloatingPlayer(reader: self))
+                floatingWindow = window
+                NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
+                    self?.floating = false; self?.mainWindow?.makeKeyAndOrderFront(nil)
+                }
+            }
+            floating = true
+            floatingWindow?.level = alwaysOnTop ? .floating : .normal
+            floatingWindow?.makeKeyAndOrderFront(nil)
+            mainWindow?.orderOut(nil)
+        }
+    }
+    @Published var deletingModel = false
+    @Published var modelMessage = "Downloads on first use; runs locally afterward."
+    func deleteModel(_ engine: String) {
+        guard !deletingModel else { return }
+        deletingModel = true
+        modelMessage = "Deleting downloaded model…"
+        stop()
+        request(["command": "delete_model", "engine": engine]) { [weak self] response in
+            self?.deletingModel = false
+            if let message = response["error"] as? String { self?.error = message; self?.modelMessage = message }
+            else { self?.status = "Model deleted · downloads again on next use"; self?.modelMessage = "Deleted. The model downloads again on next use." }
+            self?.refreshModelStorage()
+        }
+    }
     @Published var focusDocument = false
     @Published var speed = 1.0
     @Published var includeCode = false
@@ -50,7 +196,9 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var current = 0
     @Published var preview = false
     @Published var previewHTML = "<p>Preparing preview…</p>"
-    @Published var followReading = true
+    @Published var followReading = (UserDefaults.standard.object(forKey: "followReading") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(followReading, forKey: "followReading") }
+    }
     @Published var showPronunciations = false
     @Published var showShortcuts = false
     @Published var showListeningTip = false
@@ -68,9 +216,37 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
     private var speechChunks: [String] = []
     private var previewRevision = UUID()
     private var refreshWork: DispatchWorkItem?
-    @Published var filename = "Untitled.md"
+    @Published var filename = UserDefaults.standard.string(forKey: "filename") ?? "Untitled.md"
     @Published var error: String?
-    let voices: [Voice]
+    let baseVoices: [Voice]
+    @Published var referenceVoices: [ReferenceVoice] = []
+    @Published var selectedModel = "kokoro"
+    @Published var modelBytes: [String: Int64] = [:]
+    var voices: [Voice] {
+        baseVoices + referenceVoices.map { Voice(id: "indicf5:\($0.id)", name: $0.name, detail: "Reference voice · IndicF5") }
+    }
+    var modelVoices: [Voice] { voices.filter { $0.id.hasPrefix(selectedModel + ":") } }
+    func selectModel() {
+        if !modelVoices.contains(where: { $0.id == voice }) { voice = modelVoices.first?.id ?? "" }
+        UserDefaults.standard.set(selectedModel, forKey: "speechModel")
+    }
+    func refreshModelStorage() {
+        request(["command": "model_info"]) { [weak self] response in
+            if let usage = response["model_bytes"] as? [String: NSNumber] {
+                self?.modelBytes = usage.mapValues { $0.int64Value }
+            }
+        }
+    }
+    func saveReferenceVoices() {
+        if let data = try? JSONEncoder().encode(referenceVoices) { UserDefaults.standard.set(data, forKey: "referenceVoices") }
+        selectModel()
+    }
+    func chooseReferenceAudio() -> String? {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.wav, .mp3, .audio]
+        panel.canChooseDirectories = false
+        return panel.runModal() == .OK ? panel.url?.path : nil
+    }
     private var idleWork: DispatchWorkItem?
     private let idleTimeout: TimeInterval = 60
     private var lastInteraction = ProcessInfo.processInfo.systemUptime
@@ -97,9 +273,18 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
                  Voice(id: "kokoro:am_michael", name: "Michael", detail: "American · Kokoro"),
                  Voice(id: "kokoro:bf_emma", name: "Emma", detail: "British · Kokoro"),
                  Voice(id: "kokoro:bm_george", name: "George", detail: "British · Kokoro")]
-        voices = list
+        let languages = ["Hindi", "Bengali", "English (Indian)", "Marathi", "Telugu", "Kannada", "Tamil", "Malayalam", "Gujarati", "Punjabi", "Assamese", "Bhojpuri", "Magahi", "Maithili", "Chhattisgarhi", "Bodo", "Dogri", "Nepali", "Sanskrit"]
+        baseVoices = list + [Voice(id: "soprano:default", name: "Soprano", detail: "English · Soprano 80M"), Voice(id: "kokoro:hf_alpha", name: "Alpha", detail: "Hindi · Kokoro"), Voice(id: "kokoro:hm_omega", name: "Omega", detail: "Hindi · Kokoro")] + languages.flatMap { language in
+            ["Female", "Male"].map { gender in Voice(id: "svara:\(language) (\(gender))", name: "\(language) · \(gender)", detail: "Svara v1 · 4-bit") }
+        }
+
         super.init()
-        voice = "kokoro:af_heart"
+        applyAppearance()
+        if let data = UserDefaults.standard.data(forKey: "referenceVoices"), let saved = try? JSONDecoder().decode([ReferenceVoice].self, from: data) { referenceVoices = saved }
+        voice = UserDefaults.standard.string(forKey: "voice").flatMap { saved in voices.contains(where: { $0.id == saved }) ? saved : nil } ?? "kokoro:af_heart"
+        let savedModel = UserDefaults.standard.string(forKey: "speechModel") ?? String(voice.split(separator: ":").first ?? "kokoro")
+        selectedModel = SpeechModel.all.contains(where: { $0.id == savedModel }) ? savedModel : "kokoro"
+        selectModel()
         let savedLimit = UserDefaults.standard.integer(forKey: "audioCacheLimitMB")
         if [100, 250, 500, 1024, 2048, 5120, 10240].contains(savedLimit) { cacheLimitMB = savedLimit }
         privateAudio = UserDefaults.standard.bool(forKey: "privateAudio")
@@ -109,6 +294,12 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
             self?.userDidInteract()
             return event
         }
+        if let data = UserDefaults.standard.data(forKey: "recentDocuments"), let documents = try? JSONDecoder().decode([RecentDocument].self, from: data) {
+            recentDocuments = documents
+        } else {
+            recentDocuments = (UserDefaults.standard.stringArray(forKey: "recentFiles") ?? []).map { RecentDocument(id: $0, title: URL(fileURLWithPath: $0).lastPathComponent, path: $0) }
+        }
+        if UserDefaults.standard.string(forKey: "document") != nil { saveDraft() }
         refreshPreview()
     }
 
@@ -295,6 +486,7 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
     func documentChanged() {
         userDidInteract()
         UserDefaults.standard.set(markdown, forKey: "document")
+        saveDraft()
         refreshWork?.cancel()
         let work = DispatchWorkItem { [weak self] in self?.refreshPreview() }
         refreshWork = work
@@ -312,8 +504,12 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
 
     func start(at index: Int = 0, paused initiallyPaused: Bool = false) {
+        saveDraft()
+        if let index = recentDocuments.firstIndex(where: { $0.id == currentDocumentID }) { let document = recentDocuments.remove(at: index); recentDocuments.insert(document, at: 0); saveRecents() }
         stop()
-        error = nil; active = true; paused = initiallyPaused; status = "Preparing your Markdown…"
+        error = nil
+        guard !voice.isEmpty else { error = "Add an IndicF5 reference voice in Settings before listening."; openSettings(); return }
+        active = true; paused = initiallyPaused; status = "Preparing your Markdown…"
         selectedVoice = voice
         sessionPrivateAudio = privateAudio
         let session = generation
@@ -327,7 +523,6 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
             guard !self.chunks.isEmpty else { self.fail("Add some readable text first."); return }
             self.current = max(0, min(index, self.chunks.count - 1))
             self.nextIndex = self.current
-            self.followReading = true
             self.preview = true
             self.fillQueue()
         }
@@ -339,7 +534,12 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         let index = nextIndex; nextIndex += 1
         let session = generation
         if player == nil { status = sessionPrivateAudio ? "Generating private audio…" : "Checking saved audio… Generating if needed." }
-        request(["command": "synth", "text": speechChunks[index], "voice": String(selectedVoice.split(separator: ":", maxSplits: 1)[1]), "engine": "kokoro", "speed": 1.0, "private": sessionPrivateAudio]) { [weak self] response in
+        var payload: [String: Any] = ["command": "synth", "text": speechChunks[index], "voice": String(selectedVoice.split(separator: ":", maxSplits: 1)[1]), "engine": String(selectedVoice.split(separator: ":", maxSplits: 1)[0]), "speed": 1.0, "private": sessionPrivateAudio]
+        if let reference = referenceVoices.first(where: { "indicf5:" + $0.id == selectedVoice }) {
+            payload["reference_audio"] = reference.path
+            payload["reference_text"] = reference.transcript
+        }
+        request(payload) { [weak self] response in
             guard let self else { return }
             guard self.generation == session else {
                 if let path = response["path"] as? String { try? FileManager.default.removeItem(atPath: path) }
@@ -452,7 +652,7 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         try? FileManager.default.removeItem(at: audioDirectory)
         userDidInteract()
     }
-    private func fail(_ message: String) { cacheBusy = false; stop(); error = message; status = "Something needs attention" }
+    private func fail(_ message: String) { if deletingModel { deletingModel = false; modelMessage = message }; cacheBusy = false; stop(); error = message; status = "Something needs attention" }
     func shutdown() {
         stop(); releaseWorker()
         if let activityMonitor { NSEvent.removeMonitor(activityMonitor) }; activityMonitor = nil
@@ -470,6 +670,11 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.plainText, .pdf, .rtf] + ["md", "markdown", "doc", "docx"].compactMap { UTType(filenameExtension: $0) }
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        openDocument(url)
+    }
+    func openDocument(_ url: URL) {
+        guard !importing else { return }
+        saveDraft()
         importing = true
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             let result = Result { try DocumentImport.text(from: url) }
@@ -477,7 +682,14 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
                 guard let self else { return }
                 self.importing = false
                 switch result {
-                case .success(let text): self.stop(); self.markdown = text; self.filename = url.lastPathComponent
+                case .success(let text):
+                    self.stop(); self.loadingDocument = true
+                    let old = self.recentDocuments.first { $0.path == url.path }
+                    let document = RecentDocument(id: old?.id ?? UUID().uuidString, title: old?.title ?? url.lastPathComponent, path: url.path, text: text)
+                    self.recentDocuments.removeAll { $0.path == url.path }; self.recentDocuments.insert(document, at: 0)
+                    self.currentDocumentID = document.id; self.markdown = text; self.filename = document.title
+                    self.saveRecents(); self.documentChanged()
+                    DispatchQueue.main.async { self.loadingDocument = false }
                 case .failure(let error): self.error = "Could not import document: \(error.localizedDescription)"
                 }
             }
@@ -485,285 +697,551 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
     }
 }
 
-struct ContentView: View {
-    @ObservedObject var reader: Reader
-    @FocusState private var inputFocused: Bool
-    private let ink = Color(red: 0.16, green: 0.23, blue: 0.21)
-    private let paper = Color(red: 0.97, green: 0.96, blue: 0.93)
-    var body: some View {
-        HStack(spacing: 0) {
-            if !reader.focusDocument {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack(spacing: 10) {
-                    Image(systemName: "waveform.circle.fill").font(.system(size: 34)).foregroundStyle(ink)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("AudibleInk").font(.system(size: 25, weight: .semibold, design: .serif))
-                        Text("MARKDOWN, OUT LOUD").font(.system(size: 8, weight: .semibold)).tracking(2)
-                    }
-                }.padding(.bottom, 14)
-                Text("YOUR STUDIO").font(.system(size: 10, weight: .semibold)).tracking(2).foregroundStyle(.secondary)
-                Label("Reading room", systemImage: "book.closed").font(.system(size: 14, weight: .medium))
-                    .padding(12).frame(maxWidth: .infinity, alignment: .leading).background(ink.opacity(0.08)).clipShape(RoundedRectangle(cornerRadius: 9))
-                Button(action: reader.openFile) { Label("Open Document", systemImage: "plus") }.buttonStyle(.plain).keyboardShortcut("o")
-                Divider()
-                VStack(alignment: .leading, spacing: 12) {
-                    Text("THE VOICE").font(.system(size: 10, weight: .semibold)).tracking(2).foregroundStyle(.secondary)
-                    Picker("Voice", selection: $reader.voice) {
-                        ForEach(reader.voices) { voice in Text("\(voice.name) · \(voice.detail)").tag(voice.id) }
-                    }.labelsHidden().frame(maxWidth: .infinity)
-                }
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack { Text("Pace"); Spacer(); Text(String(format: "%.2f×", reader.speed)).monospacedDigit() }.font(.system(size: 12))
-                    Slider(value: $reader.speed, in: 0.5...2.0, step: 0.25).tint(ink)
-                    HStack { Text("Unhurried"); Spacer(); Text("Brisk") }.font(.system(size: 10)).foregroundStyle(.secondary)
-                }
-                Toggle("Read code blocks", isOn: $reader.includeCode).font(.system(size: 12)).toggleStyle(.checkbox)
-                Button("Pronunciation dictionary…") { reader.showPronunciations = true }.buttonStyle(.plain).font(.system(size: 12))
-                Button("Audio cache…") {
-                    reader.showCacheSettings = true
-                    reader.refreshCacheInfo()
-                }.buttonStyle(.plain).font(.system(size: 12))
-                if reader.privateAudio { Label("Private audio", systemImage: "lock").font(.system(size: 11)).foregroundStyle(.secondary) }
-                Spacer()
-            }.padding(18).frame(width: 245).background(paper)
-            Rectangle().fill(ink.opacity(0.1)).frame(width: 1)
-            }
-            VStack(alignment: .leading, spacing: 0) {
-                HStack {
-                    Label(reader.filename, systemImage: "doc.text").font(.system(size: 12)).foregroundStyle(ink.opacity(0.85))
-                    listeningTipButton
-                    if reader.importing {
-                        Text("Importing document…").font(.system(size: 11)).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    Button { reader.focusDocument.toggle() } label: {
-                        Image(systemName: reader.focusDocument ? "sidebar.left" : "arrow.up.left.and.arrow.down.right")
-                    }.buttonStyle(.plain).help(reader.focusDocument ? "Show voice controls" : "Expand document")
-                    Text("LOCAL AUDIO").font(.system(size: 9, weight: .semibold)).tracking(1.5).foregroundStyle(ink)
-                    Circle().fill(Color.green.opacity(0.7)).frame(width: 6, height: 6)
-                }.padding(.horizontal, 18).padding(.vertical, 12)
-                Divider()
-                HStack(spacing: 8) {
-                    ForEach([false, true], id: \.self) { preview in
-                        Button {
-                            reader.preview = preview
-                            inputFocused = false
-                        } label: {
-                            Text(preview ? "Preview" : "Input")
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(reader.preview == preview ? Color.white : ink)
-                                .padding(.horizontal, 18).padding(.vertical, 8)
-                                .background(reader.preview == preview ? ink : ink.opacity(0.07))
-                                .clipShape(RoundedRectangle(cornerRadius: 7))
-                        }.buttonStyle(.plain)
-                    }
-                    Spacer()
-                }.padding(.horizontal, 18).padding(.vertical, 10)
-                ZStack(alignment: .topLeading) {
-                    if reader.preview {
-                        MarkdownPreview(reader: reader)
-                    } else {
-                        TextEditor(text: $reader.markdown).font(.system(size: 14, design: .monospaced)).lineSpacing(7).scrollContentBackground(.hidden).padding(10).focused($inputFocused)
-                    }
-                }.frame(maxWidth: .infinity, maxHeight: .infinity).background(Color.white.opacity(0.75)).clipShape(RoundedRectangle(cornerRadius: 12))
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(ink.opacity(0.1))).padding(.horizontal, 18)
-                HStack { if reader.preview { Toggle("Follow reading", isOn: $reader.followReading).toggleStyle(.checkbox) }; Spacer(); Text("\(reader.wordCount) words · ~\(max(1, Int(Double(reader.wordCount) / (155 * reader.speed)))) min") }
-                    .font(.system(size: 10)).foregroundStyle(.secondary).padding(.horizontal, 18).padding(.vertical, 10)
-                if let error = reader.error {
-                    Text(error).font(.system(size: 12)).foregroundStyle(.red).textSelection(.enabled).padding(.horizontal, 18).padding(.bottom, 12)
-                }
-                VStack(alignment: .leading, spacing: 14) {
-                    ProgressView(value: reader.progress).tint(ink)
-                    HStack(spacing: 14) {
-                        Button(action: reader.togglePlayback) {
-                            Label(reader.active ? (reader.paused ? "Resume" : "Pause") : "Start listening", systemImage: reader.active && !reader.paused ? "pause.fill" : "play.fill")
-                                .font(.system(size: 13, weight: .medium)).padding(.horizontal, 18).padding(.vertical, 12)
-                                .background(ink).foregroundStyle(.white).clipShape(Capsule())
-                        }.buttonStyle(.plain).keyboardShortcut(.return, modifiers: .command).disabled(reader.markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                        if reader.active { Button(action: reader.stop) { Image(systemName: "stop.fill") }.buttonStyle(.plain).help("Stop reading") }
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(reader.status).font(.system(size: 11, weight: .medium))
-                            if !reader.chunks.isEmpty { Text("Passage \(min(reader.current + 1, reader.chunks.count)) of \(reader.chunks.count)").font(.system(size: 10)).foregroundStyle(.secondary) }
-                        }
-                        Spacer()
-                        Image(systemName: "waveform").font(.system(size: 26)).foregroundStyle(ink.opacity(0.45))
-                    }
-                }.padding(16).background(paper).clipShape(RoundedRectangle(cornerRadius: 14)).padding(.horizontal, 18).padding(.bottom, 16)
-            }.background(Color(red: 0.99, green: 0.985, blue: 0.97))
-        }.foregroundStyle(ink).preferredColorScheme(.light).frame(minWidth: 960, minHeight: 700)
-        .background(PlaybackShortcuts { key in
-            switch key {
-            case " ": reader.togglePlayback()
-            case "s": reader.stop()
-            case "startStop": reader.toggleStartStop()
-            case "escape":
-                inputFocused = false
-                NSApplication.shared.keyWindow?.makeFirstResponder(nil)
-            case "preview":
-                inputFocused = false
-                NSApplication.shared.keyWindow?.makeFirstResponder(nil)
-                reader.preview.toggle()
-            case "fullscreen": NSApp.keyWindow?.toggleFullScreen(nil)
-            case "follow": reader.followReading.toggle()
-            case "previous": reader.movePassage(by: -1)
-            case "next": reader.movePassage(by: 1)
-            case "i":
-                reader.preview = false
-                DispatchQueue.main.async { inputFocused = true }
-            case "[": reader.speed = max(0.5, reader.speed - 0.25)
-            case "]": reader.speed = min(2.0, reader.speed + 0.25)
-            default: return
-            }
-        })
-        .onChange(of: reader.speed) { reader.updatePlaybackSpeed() }
-        .onChange(of: reader.markdown) {
-            if reader.active { reader.stop() }
-            reader.documentChanged()
-        }
-        .onChange(of: reader.includeCode) { reader.refreshPreview() }
-        .onChange(of: reader.pronunciations) { UserDefaults.standard.set(reader.pronunciations, forKey: "pronunciations") }
-        .onChange(of: reader.cacheLimitMB) { reader.updateCacheLimit() }
-        .onChange(of: reader.privateAudio) { reader.updatePrivateAudio() }
-        .sheet(isPresented: $reader.showCacheSettings) { cacheSettings }
-        .sheet(isPresented: $reader.showShortcuts) {
-            VStack(alignment: .leading, spacing: 20) {
-                Text("Keyboard Shortcuts").font(.system(size: 24, design: .serif))
-                Grid(alignment: .leading, horizontalSpacing: 48, verticalSpacing: 14) {
-                    shortcutRow("Start / Pause / Resume", "Space / ⌘ Return")
-                    shortcutRow("Start / Stop playback", "⌘ S")
-                    shortcutRow("Stop playback", "S")
-                    shortcutRow("Focus input", "I / ⌘ I")
-                    shortcutRow("Leave input", "Esc")
-                    shortcutRow("Decrease pace by 0.25×", "[ / ⌘ [")
-                    shortcutRow("Increase pace by 0.25×", "] / ⌘ ]")
-                    shortcutRow("Toggle Input / Preview", "⌘ P")
-                    shortcutRow("Toggle Follow reading", "⌘ F")
-                    shortcutRow("Toggle full screen", "⌥ F")
-                    shortcutRow("Previous / Next passage", "⌘ ← / ⌘ →")
-                    shortcutRow("Open Document", "⌘ O")
-                }
-                Text("Single-key shortcuts are inactive while typing. Pace ranges from 0.5× to 2×.")
-                    .font(.system(size: 11)).foregroundStyle(.secondary)
-                HStack { Spacer(); Button("Done") { reader.showShortcuts = false }.keyboardShortcut(.defaultAction) }
-            }.padding(28).frame(width: 550)
-        }
-        .sheet(isPresented: $reader.showPronunciations) {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("Say it your way").font(.system(size: 25, design: .serif))
-                TextEditor(text: $reader.pronunciations).font(.system(size: 13, design: .monospaced)).frame(height: 290).border(Color.gray.opacity(0.3))
-                Toggle("Separate camelCase words and speak common operators", isOn: $reader.technical)
-                HStack { Spacer(); Button("Done") { reader.showPronunciations = false }.keyboardShortcut(.defaultAction) }
-            }.padding(28).frame(width: 570)
-        }
+struct ShortcutBinding: Codable, Identifiable {
+    var id: String
+    var title: String
+    var key: String
+    var modifiers: UInt
+    static let defaults: [ShortcutBinding] = [
+        .init(id: " ", title: "Play / Pause / Resume", key: "space", modifiers: 0),
+        .init(id: "startStop", title: "Start / Stop", key: "s", modifiers: NSEvent.ModifierFlags.command.rawValue),
+        .init(id: "s", title: "Stop", key: "s", modifiers: 0),
+        .init(id: "i", title: "Focus input", key: "i", modifiers: 0),
+        .init(id: "escape", title: "Leave input", key: "escape", modifiers: 0),
+        .init(id: "[", title: "Slower", key: "[", modifiers: 0),
+        .init(id: "]", title: "Faster", key: "]", modifiers: 0),
+        .init(id: "preview", title: "Input / Preview", key: "p", modifiers: NSEvent.ModifierFlags.command.rawValue),
+        .init(id: "follow", title: "Follow reading", key: "f", modifiers: NSEvent.ModifierFlags.command.rawValue),
+        .init(id: "previous", title: "Previous passage", key: "left", modifiers: NSEvent.ModifierFlags.command.rawValue),
+        .init(id: "next", title: "Next passage", key: "right", modifiers: NSEvent.ModifierFlags.command.rawValue),
+        .init(id: "fullscreen", title: "Full screen", key: "f", modifiers: NSEvent.ModifierFlags.option.rawValue),
+        .init(id: "floating", title: "Main / Floating player", key: "t", modifiers: NSEvent.ModifierFlags.command.rawValue),
+        .init(id: "settings", title: "Settings", key: ",", modifiers: NSEvent.ModifierFlags.command.rawValue),
+        .init(id: "open", title: "Open document", key: "o", modifiers: NSEvent.ModifierFlags.command.rawValue)
+    ]
+    static func load() -> [ShortcutBinding] {
+        guard let data = UserDefaults.standard.data(forKey: "shortcuts"), let saved = try? JSONDecoder().decode([ShortcutBinding].self, from: data) else { return defaults }
+        return defaults.map { item in saved.first(where: { $0.id == item.id }) ?? item }
     }
-    private var cacheSettings: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            Text("Audio cache").font(.system(size: 25, design: .serif))
-            Text("Reuse saved passages without generating speech again. There is no time limit; the least recently played audio is removed when storage fills up.")
-                .font(.system(size: 12)).foregroundStyle(.secondary)
-            Picker("Maximum storage", selection: $reader.cacheLimitMB) {
-                Text("100 MB").tag(100)
-                Text("250 MB").tag(250)
-                Text("500 MB").tag(500)
-                Text("1 GB").tag(1024)
-                Text("2 GB").tag(2048)
-                Text("5 GB").tag(5120)
-                Text("10 GB").tag(10240)
-            }.disabled(reader.cacheBusy)
-            HStack {
-                Text("\(reader.cacheUsage) used · \(reader.cacheFiles) saved passages")
-                    .font(.system(size: 12)).foregroundStyle(.secondary)
-                Spacer()
-                if reader.cacheBusy { ProgressView().controlSize(.small) }
-                Button("Clear Cache", action: reader.clearAudioCache).disabled(reader.cacheBusy)
-            }
-            Text("Changing the limit applies immediately. Clear Cache stops reading and removes saved passage audio. Downloaded models are kept.")
-                .font(.system(size: 11)).foregroundStyle(.secondary)
-            Divider()
-            Toggle("Private audio — don’t read or save cached speech", isOn: $reader.privateAudio)
-                .font(.system(size: 12))
-            Text("Changing private audio stops reading. Existing cached audio stays until cleared. Your draft and pronunciation dictionary are still saved normally.")
-                .font(.system(size: 11)).foregroundStyle(.secondary)
-            HStack { Spacer(); Button("Done") { reader.showCacheSettings = false }.keyboardShortcut(.defaultAction) }
-        }.padding(28).frame(width: 540)
-    }
-
-    private var listeningTipButton: some View {
-                    Button { reader.showListeningTip.toggle() } label: {
-                        Image(systemName: "info.circle").font(.system(size: 12)).foregroundStyle(.secondary)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Listening tip")
-                    .help("Listening tip")
-                    .popover(isPresented: $reader.showListeningTip) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Listening tip").font(.headline)
-                            Text("For complex notes with code or diagrams, ask an LLM for a TTS-friendly version for a better listening experience.")
-                                .font(.system(size: 12))
-                            Text("You can find keyboard shortcuts in the Help menu.")
-                                .font(.system(size: 12))
-                        }.padding(16).frame(width: 290)
-                    }
-    }
-
-    private func shortcutRow(_ title: String, _ keys: String) -> some View {
-        GridRow {
-            Text(title).font(.system(size: 13))
-            Text(keys).font(.system(size: 12, weight: .medium, design: .monospaced))
-                .padding(.horizontal, 9).padding(.vertical, 4)
-                .background(Color.black.opacity(0.06)).clipShape(RoundedRectangle(cornerRadius: 5))
+    static func normalized(_ key: String) -> String {
+        switch key {
+        case " ": return "space"
+        case "\r": return "return"
+        case "\u{1b}": return "escape"
+        case "\u{f702}": return "left"
+        case "\u{f703}": return "right"
+        default: return key.lowercased()
         }
     }
 }
 
-struct PlaybackShortcuts: NSViewRepresentable {
-    static func command(for key: String, modifiers: NSEvent.ModifierFlags, editing: Bool) -> String? {
-        let modifiers = modifiers.intersection([.command, .control, .option, .shift])
-        if modifiers == .option, key == "f" { return "fullscreen" }
-        if modifiers == .command {
-            switch key {
-            case "s": return "startStop"
-            case "i", "[", "]": return key
-            case "p": return "preview"
-            case "f": return "follow"
-            case "\u{f702}": return "previous"
-            case "\u{f703}": return "next"
-            case "\r": return " "
-            default: return nil
-            }
+extension Reader {
+    func perform(_ command: String) {
+        switch command {
+        case " ": togglePlayback()
+        case "s": stop()
+        case "startStop": toggleStartStop()
+        case "escape": NSApp.keyWindow?.makeFirstResponder(nil)
+        case "preview": preview.toggle()
+        case "fullscreen": NSApp.keyWindow?.toggleFullScreen(nil)
+        case "follow": followReading.toggle()
+        case "previous": movePassage(by: -1)
+        case "next": movePassage(by: 1)
+        case "i": preview = false; NotificationCenter.default.post(name: .init("FocusInput"), object: nil)
+        case "[": speed = max(0.5, speed - 0.25)
+        case "]": speed = min(2, speed + 0.25)
+        case "floating": toggleFloating()
+        case "settings": if floating { toggleFloating() }; openSettings()
+        case "open": openFile()
+        default: break
         }
-        guard modifiers.isEmpty else { return nil }
-        if key == "\u{1b}" { return "escape" }
-        guard !editing, [" ", "s", "i", "[", "]"].contains(key) else { return nil }
-        return key
     }
+}
 
-    let action: (String) -> Void
-    func makeCoordinator() -> Coordinator { Coordinator(action: action) }
+struct WindowReader: NSViewRepresentable {
+    let reader: Reader
     func makeNSView(context: Context) -> NSView {
         let view = NSView()
-        context.coordinator.view = view
-        context.coordinator.install()
+        DispatchQueue.main.async { reader.mainWindow = view.window; view.window?.titleVisibility = .hidden }
         return view
     }
-    func updateNSView(_ view: NSView, context: Context) { context.coordinator.action = action }
-    static func dismantleNSView(_ view: NSView, coordinator: Coordinator) { coordinator.remove() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
 
+struct VoiceSpeedControls: View {
+    @ObservedObject var reader: Reader
+    var body: some View {
+        HStack(spacing: 4) {
+            Picker("Speed", selection: $reader.speed) {
+                ForEach([0.5, 0.75, 1, 1.25, 1.5, 1.75, 2], id: \.self) { speed in Text(String(format: "%.2f×", speed)).tag(speed) }
+            }.labelsHidden().frame(width: 68).help("Playback speed")
+                .padding(.horizontal, 3).padding(.vertical, 5).background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+            Picker("Voice", selection: $reader.voice) {
+                ForEach(reader.modelVoices) { voice in
+                    Text("\(voice.name) · \(voice.detail)").tag(voice.id)
+                }
+                if reader.modelVoices.isEmpty { Text("Add reference voice in Settings").tag("") }
+            }.labelsHidden().frame(minWidth: 100, idealWidth: 180, maxWidth: 230).help("Choose voice")
+                .padding(8).background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+        }.controlSize(.small).fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+extension Reader {
+    var estimatedDuration: Double { Double(wordCount) * 60 / (155 * speed) }
+    var estimatedElapsed: Double {
+        guard !chunks.isEmpty else { return 0 }
+        if current >= chunks.count { return estimatedDuration }
+        let words = chunks.prefix(current).joined(separator: " ").split(whereSeparator: { $0.isWhitespace }).count
+        return min(estimatedDuration, Double(words) * 60 / (155 * speed) + (player?.currentTime ?? 0) / speed)
+    }
+    func timeLabel(_ seconds: Double) -> String {
+        let seconds = max(0, Int(seconds.rounded()))
+        return String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+}
+
+struct PlaybackProgressStyle: ProgressViewStyle {
+    @Environment(\.colorScheme) private var colorScheme
+
+    func makeBody(configuration: Configuration) -> some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.primary.opacity(colorScheme == .light ? 0.18 : 0.22))
+                Capsule().fill(Color.primary.opacity(0.8))
+                    .frame(width: geometry.size.width * min(1, max(0, configuration.fractionCompleted ?? 0)))
+            }
+        }.frame(height: 5)
+    }
+}
+
+struct PlaybackControls: View {
+    @ObservedObject var reader: Reader
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                HStack(spacing: 8) {
+                    Text(reader.timeLabel(reader.estimatedElapsed))
+                    ProgressView(value: reader.estimatedDuration > 0 ? reader.estimatedElapsed / reader.estimatedDuration : 0)
+                        .progressViewStyle(PlaybackProgressStyle())
+                    Text("~" + reader.timeLabel(max(0, reader.estimatedDuration - reader.estimatedElapsed)))
+                }.font(.caption2.monospacedDigit()).foregroundStyle(.secondary).help("Estimated elapsed time and time remaining")
+            }
+            HStack(spacing: 10) {
+                HStack(spacing: 14) {
+                Button { reader.movePassage(by: -1) } label: { Image(systemName: "backward.end.fill") }.disabled(!reader.active).help("Previous passage")
+                Button(action: reader.togglePlayback) { Image(systemName: reader.active && !reader.paused ? "pause.fill" : "play.fill") }
+                    .accessibilityLabel(reader.active && !reader.paused ? "Pause" : "Play").help(reader.active && !reader.paused ? "Pause" : "Play")
+                    .disabled(reader.markdown.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button(action: reader.stop) { Image(systemName: "stop.fill") }.disabled(!reader.active).help("Stop")
+                Button { reader.movePassage(by: 1) } label: { Image(systemName: "forward.end.fill") }.disabled(!reader.active).help("Next passage")
+                }.padding(8).background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+                VoiceSpeedControls(reader: reader).padding(.horizontal, 8)
+                Spacer(minLength: 0)
+                Button(action: reader.toggleFloating) { Image(systemName: reader.floating ? "macwindow" : "pip.enter") }
+                    .help(reader.floating ? "Return to main window (⌘T)" : "Floating player (⌘T)")
+            }.buttonStyle(.borderless)
+            Text(reader.status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+        }.padding(16)
+    }
+}
+
+struct FloatingPlayer: View {
+    @ObservedObject var reader: Reader
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text(reader.filename).lineLimit(1).font(.headline)
+                Spacer()
+                Toggle(isOn: $reader.alwaysOnTop) { Image(systemName: "pin") }.toggleStyle(.button).help("Always on top")
+            }.padding(.horizontal, 16).padding(.top, 12)
+            PlaybackControls(reader: reader)
+            if let error = reader.error { Text(error).font(.caption).foregroundStyle(.red).padding(.horizontal) }
+        }.frame(minWidth: 408, minHeight: 170)
+        .background(PlaybackShortcuts(reader: reader))
+    }
+}
+
+final class PastingTextView: NSTextView {
+    var willPaste: ((Bool) -> Void)?
+    override func paste(_ sender: Any?) {
+        willPaste?(selectedRange().length == string.utf16.count)
+        super.paste(sender)
+    }
+}
+
+struct InputEditor: NSViewRepresentable {
+    @ObservedObject var reader: Reader
+    func makeCoordinator() -> Coordinator { Coordinator(reader: reader) }
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        let text = PastingTextView(frame: .zero)
+        text.isRichText = false; text.allowsUndo = true
+        text.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
+        text.textColor = .labelColor; text.backgroundColor = .textBackgroundColor
+        text.textContainerInset = NSSize(width: 10, height: 12)
+        text.isVerticallyResizable = true; text.isHorizontallyResizable = false
+        text.autoresizingMask = [.width]
+        text.textContainer?.widthTracksTextView = true
+        text.string = reader.markdown
+        text.delegate = context.coordinator
+        text.willPaste = { [weak reader] replacing in reader?.beginPaste(replacingDocument: replacing) }
+        scroll.documentView = text
+        context.coordinator.text = text
+        context.coordinator.focusObserver = NotificationCenter.default.addObserver(forName: .init("FocusInput"), object: nil, queue: .main) { [weak text] _ in
+            guard let text else { return }; text.window?.makeFirstResponder(text)
+        }
+        return scroll
+    }
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        guard let text = scroll.documentView as? NSTextView, text.string != reader.markdown else { return }
+        text.string = reader.markdown
+        text.undoManager?.removeAllActions()
+    }
+    final class Coordinator: NSObject, NSTextViewDelegate {
+        let reader: Reader
+        weak var text: NSTextView?
+        var focusObserver: NSObjectProtocol?
+        init(reader: Reader) { self.reader = reader }
+        func textDidChange(_ notification: Notification) { if let text { reader.markdown = text.string } }
+        deinit { if let focusObserver { NotificationCenter.default.removeObserver(focusObserver) } }
+    }
+}
+
+final class RecentRowState: ObservableObject { @Published var hovering = false }
+
+struct RecentDocumentRow: View {
+    @ObservedObject var reader: Reader
+    let document: RecentDocument
+    @StateObject private var row = RecentRowState()
+    @FocusState private var editing: Bool
+    var body: some View {
+        HStack(spacing: 6) {
+            if reader.renamingDocumentID == document.id {
+                TextField("Name", text: $reader.renameText).textFieldStyle(.plain).focused($editing)
+                    .onSubmit { reader.finishRename() }
+                    .onExitCommand { reader.renamingDocumentID = nil }
+                    .onAppear { editing = true }
+                    .onChange(of: editing) { if !editing && reader.renamingDocumentID == document.id { reader.finishRename() } }
+            } else {
+                Button { reader.openRecent(document) } label: {
+                    Label(document.title, systemImage: document.path == nil ? "text.alignleft" : "doc.text")
+                        .lineLimit(1).frame(maxWidth: .infinity, alignment: .leading)
+                }.buttonStyle(.plain).help(document.path ?? document.title)
+                Button { reader.renameRecent(document) } label: { Image(systemName: "pencil") }
+                    .buttonStyle(.plain).opacity(row.hovering ? 1 : 0).help("Rename document")
+            }
+        }.padding(.horizontal, 8).padding(.vertical, 4).onHover { row.hovering = $0 }
+    }
+}
+
+struct ContentView: View {
+    @ObservedObject var reader: Reader
+    @FocusState private var inputFocused: Bool
+    var body: some View {
+        HStack(spacing: 0) {
+            if !reader.focusDocument {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack {
+                        Image(nsImage: NSApplication.shared.applicationIconImage).resizable().frame(width: 30, height: 30)
+                        Text("AudibleInk").font(.system(size: 24, weight: .semibold, design: .serif))
+                    }
+                    Button(action: reader.openFile) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "doc.badge.plus").frame(width: 22, height: 22)
+                            Text("Open Document")
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                    }.buttonStyle(.plain)
+                    Button(action: reader.newDraft) {
+                        HStack(spacing: 8) {
+                            Image(systemName: "square.and.pencil").frame(width: 22, height: 22)
+                            Text("New Text")
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                    }.buttonStyle(.plain)
+                    Divider()
+                    Text("RECENT DOCUMENTS").font(.caption2).foregroundStyle(.secondary)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 3) {
+                            ForEach(reader.recentDocuments) { document in
+                                RecentDocumentRow(reader: reader, document: document)
+                            }
+                            if reader.recentDocuments.isEmpty { Text("Documents and pasted text appear here.").font(.caption).foregroundStyle(.secondary) }
+                        }
+                    }
+                    Spacer()
+                    Button { reader.openSettings() } label: { Label("Settings", systemImage: "gearshape") }.buttonStyle(.plain)
+                }.padding(18).frame(width: 225).background(Color(nsColor: .controlBackgroundColor))
+                Divider()
+            } else {
+                VStack(spacing: 22) {
+                    Image(nsImage: NSApplication.shared.applicationIconImage).resizable().frame(width: 30, height: 30).help("AudibleInk")
+                    Button(action: reader.openFile) { Image(systemName: "doc.badge.plus").frame(width: 30, height: 30) }.help("Open Document")
+                    Button(action: reader.newDraft) { Image(systemName: "square.and.pencil").frame(width: 30, height: 30) }.help("New Text")
+                    Spacer()
+                    Button { reader.openSettings() } label: { Image(systemName: "gearshape") }.help("Settings")
+                }.buttonStyle(.plain).font(.system(size: 17)).padding(.vertical, 18).frame(width: 58)
+                    .background(Color(nsColor: .controlBackgroundColor))
+                Divider()
+            }
+            VStack(spacing: 12) {
+                HStack {
+                    Picker("Document", selection: $reader.preview) { Text("Input").tag(false); Text("Preview").tag(true) }.pickerStyle(.segmented).labelsHidden().frame(width: 180)
+                    Spacer()
+                    if reader.importing { ProgressView().controlSize(.small) }
+                    Text("\(reader.wordCount) words").font(.caption).foregroundStyle(.secondary)
+                    Picker("Model", selection: $reader.selectedModel) {
+                        ForEach(SpeechModel.all) { model in Text(model.name).tag(model.id) }
+                    }.labelsHidden().frame(width: 165).help("Speech model")
+                }
+                if reader.preview { MarkdownPreview(reader: reader) }
+                else { InputEditor(reader: reader) }
+                if let error = reader.error { Text(error).foregroundStyle(.red).font(.caption).textSelection(.enabled) }
+                PlaybackControls(reader: reader).background(.quaternary.opacity(0.3)).clipShape(RoundedRectangle(cornerRadius: 12))
+            }.padding(16)
+        }.frame(minWidth: 800, minHeight: 560)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button { reader.focusDocument.toggle() } label: { Image(systemName: "sidebar.left") }.help("Toggle sidebar")
+            }
+            if #available(macOS 26.0, *) {
+                ToolbarItem(placement: .principal) {
+                    Text(reader.filename).font(.headline).lineLimit(1).frame(maxWidth: .infinity, alignment: .center)
+                }.sharedBackgroundVisibility(.hidden)
+            } else {
+                ToolbarItem(placement: .principal) {
+                    Text(reader.filename).font(.headline).lineLimit(1).frame(maxWidth: .infinity, alignment: .center)
+                }
+            }
+        }
+        .background(WindowReader(reader: reader))
+        .background(PlaybackShortcuts(reader: reader))
+        .onReceive(NotificationCenter.default.publisher(for: .init("FocusInput"))) { _ in inputFocused = true }
+        .onChange(of: reader.speed) { reader.updatePlaybackSpeed() }
+        .onChange(of: reader.selectedModel) { reader.selectModel() }
+        .onChange(of: reader.voice) { UserDefaults.standard.set(reader.voice, forKey: "voice") }
+        .onChange(of: reader.markdown) { if reader.active { reader.stop() }; reader.documentChanged() }
+        .onChange(of: reader.includeCode) { reader.refreshPreview() }
+        .onChange(of: reader.pronunciations) { UserDefaults.standard.set(reader.pronunciations, forKey: "pronunciations") }
+        .onChange(of: reader.cacheLimitMB) { reader.updateCacheLimit() }
+        .onChange(of: reader.privateAudio) { reader.updatePrivateAudio() }
+        .sheet(isPresented: $reader.showSettings) { ReaderSettings(reader: reader) }
+    }
+}
+
+struct ReaderSettings: View {
+    @ObservedObject var reader: Reader
+    private let sections = [("general", "General", "gearshape"), ("cache", "Audio Cache", "internaldrive"), ("dictionary", "Dictionary", "character.book.closed"), ("shortcuts", "Keyboard Shortcuts", "keyboard"), ("tips", "Listening Tip", "info.circle")]
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Settings").font(.title2).padding(.bottom, 16)
+                    ForEach(sections, id: \.0) { section in
+                        Button { reader.settingsTab = section.0 } label: {
+                            Label(section.1, systemImage: section.2).font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                                .background(reader.settingsTab == section.0 ? Color.accentColor.opacity(0.14) : .clear).clipShape(RoundedRectangle(cornerRadius: 7))
+                        }.buttonStyle(.plain).focusable(false)
+                    }
+                    Spacer()
+                }.padding(18).frame(width: 205).background(.quaternary.opacity(0.3))
+                Divider()
+                VStack(alignment: .leading, spacing: 18) {
+                    Text(sections.first(where: { $0.0 == reader.settingsTab })?.1 ?? "General").font(.title2)
+                    settingsContent
+                }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            }
+            Divider()
+            HStack { Spacer(); Button("Done") { reader.showSettings = false }.keyboardShortcut(.defaultAction) }.padding(14)
+        }.frame(width: 790, height: 530)
+    }
+    @ViewBuilder private var settingsContent: some View {
+        switch reader.settingsTab {
+        case "cache":
+            Picker("Maximum storage", selection: $reader.cacheLimitMB) {
+                ForEach([100, 250, 500, 1024, 2048, 5120, 10240], id: \.self) { limit in Text(limit < 1024 ? "\(limit) MB" : "\(limit / 1024) GB").tag(limit) }
+            }.disabled(reader.cacheBusy)
+            HStack { Text("\(reader.cacheUsage) · \(reader.cacheFiles) passages"); Spacer(); Button("Clear Cache", action: reader.clearAudioCache).disabled(reader.cacheBusy) }
+                .onAppear { reader.refreshCacheInfo() }
+            Toggle("Private audio", isOn: $reader.privateAudio)
+        case "dictionary":
+            Text("One replacement per line: API = A P I").font(.caption).foregroundStyle(.secondary)
+            TextEditor(text: $reader.pronunciations).font(.system(.body, design: .monospaced))
+            Toggle("Technical pronunciation cleanup", isOn: $reader.technical)
+        case "shortcuts": ShortcutEditor(reader: reader)
+        case "tips":
+            Text("For documents or notes with complex code blocks or diagrams, ask an LLM to create a TTS-friendly version for a better listening experience.")
+        default:
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+            Picker("Appearance", selection: $reader.uiMode) {
+                Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark")
+            }
+            Toggle("Follow reading", isOn: $reader.followReading)
+            Toggle("Read code blocks", isOn: $reader.includeCode)
+            Toggle("Floating player always on top", isOn: $reader.alwaysOnTop)
+            Divider()
+            Text("Speech Models").font(.headline)
+            Text("All models run locally with no per-use API charge. Downloads need internet; electricity and network charges may apply. RAM figures are planning estimates, vary with passage length, and exclude the rest of the app. Only one speech model is loaded at a time.")
+                .font(.caption).foregroundStyle(.secondary)
+            ForEach(SpeechModel.all) { model in
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Text(model.name).fontWeight(.medium)
+                        Spacer()
+                        if let bytes = reader.modelBytes[model.id], bytes > 0 {
+                            Text(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)).font(.caption).foregroundStyle(.secondary)
+                            Button("Delete Model", role: .destructive) { reader.deleteModel(model.id) }.disabled(reader.deletingModel)
+                        } else { Text("Not downloaded").font(.caption).foregroundStyle(.secondary) }
+                    }
+                    Text(model.resources).font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            IndicReferenceSettings(reader: reader)
+            Text(reader.modelMessage).font(.caption).foregroundStyle(.secondary)
+                .onAppear { reader.refreshModelStorage() }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+}
+
+final class ReferenceVoiceEditor: ObservableObject {
+    @Published var name = ""
+    @Published var path = ""
+    @Published var transcript = ""
+}
+
+struct IndicReferenceSettings: View {
+    @ObservedObject var reader: Reader
+    @StateObject private var editor = ReferenceVoiceEditor()
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Divider()
+            Text("IndicF5 reference voices").font(.headline)
+            Text("Supports Hindi, Marathi, Tamil, Telugu, Kannada, Bengali, Gujarati, Malayalam, Odia, Punjabi and Assamese. Install with scripts/setup.sh, accept the IndicF5 access terms on Hugging Face, then run hf auth login in Terminal. Add a clean 5–10 second reference clip and its exact transcript; the speaker comes from this clip.").font(.caption).foregroundStyle(.secondary)
+            Link("IndicF5 model access", destination: URL(string: "https://huggingface.co/ai4bharat/IndicF5")!)
+            ForEach(reader.referenceVoices) { reference in
+                HStack {
+                    Text(reference.name)
+                    Spacer()
+                    Button("Remove Voice", role: .destructive) {
+                        reader.referenceVoices.removeAll { $0.id == reference.id }
+                        reader.saveReferenceVoices()
+                    }
+                }
+            }
+            TextField("Voice name", text: $editor.name)
+            HStack {
+                Button("Choose Reference Audio…") { if let selected = reader.chooseReferenceAudio() { editor.path = selected } }
+                Text(editor.path.isEmpty ? "No clip selected" : URL(fileURLWithPath: editor.path).lastPathComponent).font(.caption).lineLimit(1)
+            }
+            TextField("Exact reference transcript", text: $editor.transcript)
+            Button("Add Voice") {
+                reader.referenceVoices.append(ReferenceVoice(name: editor.name.trimmingCharacters(in: .whitespacesAndNewlines), path: editor.path, transcript: editor.transcript))
+                reader.saveReferenceVoices()
+                editor.name = ""; editor.path = ""; editor.transcript = ""
+            }.disabled(editor.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || editor.path.isEmpty || editor.transcript.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        }
+    }
+}
+
+final class ShortcutEditorState: ObservableObject {
+    @Published var recording: String?
+    @Published var message = "Click a shortcut and press the new key combination."
+}
+
+struct ShortcutEditor: View {
+    @ObservedObject var reader: Reader
+    @StateObject private var editor = ShortcutEditorState()
+    var body: some View {
+        VStack(alignment: .leading) {
+            Text(editor.message).font(.caption).foregroundStyle(.secondary)
+            ScrollView {
+                ForEach(reader.shortcuts) { binding in
+                    HStack {
+                        Text(binding.title)
+                        Spacer()
+                        Button(editor.recording == binding.id ? "Press keys…" : display(binding)) { editor.recording = binding.id }
+                            .frame(width: 150)
+                    }.padding(.vertical, 3)
+                }
+            }
+            Button("Restore Defaults") { reader.shortcuts = ShortcutBinding.defaults; editor.recording = nil }
+        }.padding().background(ShortcutRecorder(recording: $editor.recording) { key, flags in
+            guard let id = editor.recording, let index = reader.shortcuts.firstIndex(where: { $0.id == id }) else { return }
+            if reader.shortcuts.contains(where: { $0.id != id && $0.key == key && $0.modifiers == flags.rawValue }) {
+                editor.message = "That shortcut is already assigned. Choose another combination."
+            } else {
+                reader.shortcuts[index].key = key; reader.shortcuts[index].modifiers = flags.rawValue
+                editor.message = "Shortcut saved."
+                editor.recording = nil
+            }
+        })
+    }
+    private func display(_ binding: ShortcutBinding) -> String {
+        let flags = NSEvent.ModifierFlags(rawValue: binding.modifiers)
+        return (flags.contains(.control) ? "⌃" : "") + (flags.contains(.option) ? "⌥" : "") + (flags.contains(.shift) ? "⇧" : "") + (flags.contains(.command) ? "⌘" : "") + binding.key.capitalized
+    }
+}
+
+struct ShortcutRecorder: NSViewRepresentable {
+    @Binding var recording: String?
+    let save: (String, NSEvent.ModifierFlags) -> Void
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    func makeNSView(context: Context) -> NSView { let view = NSView(); context.coordinator.view = view; return view }
+    func updateNSView(_ view: NSView, context: Context) {
+        context.coordinator.remove()
+        guard recording != nil else { return }
+        context.coordinator.monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard view.window?.isKeyWindow == true, event.window === view.window, let key = event.charactersIgnoringModifiers, !event.isARepeat else { return event }
+            save(ShortcutBinding.normalized(event.keyCode == 3 && event.modifierFlags.contains(.option) ? "f" : key), event.modifierFlags.intersection([.command, .control, .option, .shift]))
+            return nil
+        }
+    }
+    static func dismantleNSView(_ view: NSView, coordinator: Coordinator) { coordinator.remove() }
     final class Coordinator {
         weak var view: NSView?
-        var action: (String) -> Void
-        private var monitor: Any?
-        init(action: @escaping (String) -> Void) { self.action = action }
+        var monitor: Any?
+        func remove() { if let monitor { NSEvent.removeMonitor(monitor) }; monitor = nil }
+        deinit { remove() }
+    }
+}
+
+struct PlaybackShortcuts: NSViewRepresentable {
+    let reader: Reader
+    static func command(for key: String, modifiers: NSEvent.ModifierFlags, editing: Bool, bindings: [ShortcutBinding] = ShortcutBinding.defaults) -> String? {
+        let flags = modifiers.intersection([.command, .control, .option, .shift])
+        let normalized = ShortcutBinding.normalized(key)
+        if let match = bindings.first(where: { $0.key == normalized && $0.modifiers == flags.rawValue }) {
+            return editing && flags.isEmpty && match.id != "escape" ? nil : match.id
+        }
+        // Retain familiar aliases unless their action has been customized.
+        if flags == .command {
+            let aliases = ["return": " ", "i": "i", "[": "[", "]": "]"]
+            if let action = aliases[normalized], let original = ShortcutBinding.defaults.first(where: { $0.id == action }),
+               bindings.contains(where: { $0.id == action && $0.key == original.key && $0.modifiers == original.modifiers }) { return action }
+        }
+        return nil
+    }
+    func makeCoordinator() -> Coordinator { Coordinator(reader: reader) }
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(); context.coordinator.view = view; context.coordinator.install(); return view
+    }
+    func updateNSView(_ view: NSView, context: Context) {}
+    static func dismantleNSView(_ view: NSView, coordinator: Coordinator) { coordinator.remove() }
+    final class Coordinator {
+        weak var view: NSView?
+        let reader: Reader
+        var monitor: Any?
+        init(reader: Reader) { self.reader = reader }
         func install() {
             monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-                guard let self, let window = self.view?.window,
-                      window.isKeyWindow, window.attachedSheet == nil,
-                      event.window === window,
+                guard let self, let window = self.view?.window, window.isKeyWindow, window.attachedSheet == nil, event.window === window,
                       let key = event.charactersIgnoringModifiers?.lowercased() else { return event }
-                let editing = (window.firstResponder as? NSTextView)?.isEditable == true
-                    || (window.firstResponder as? NSTextField)?.isEditable == true
-                guard let command = PlaybackShortcuts.command(for: event.keyCode == 3 && event.modifierFlags.contains(.option) ? "f" : key, modifiers: event.modifierFlags, editing: editing) else { return event }
-                if !event.isARepeat { self.action(command) }
+                let editing = (window.firstResponder as? NSTextView)?.isEditable == true || (window.firstResponder as? NSTextField)?.isEditable == true
+                guard let command = PlaybackShortcuts.command(for: event.keyCode == 3 && event.modifierFlags.contains(.option) ? "f" : key, modifiers: event.modifierFlags, editing: editing, bindings: self.reader.shortcuts) else { return event }
+                if !event.isARepeat { self.reader.perform(command) }
                 return nil
             }
         }
@@ -775,24 +1253,24 @@ struct PlaybackShortcuts: NSViewRepresentable {
 @main struct MarkdownVoiceApp: App {
     @StateObject private var reader = Reader()
     var body: some Scene {
-        WindowGroup("AudibleInk — Markdown to Speech") {
+        WindowGroup("AudibleInk") {
             ContentView(reader: reader)
-                .onAppear {
-                    if let url = Bundle.main.url(forResource: "AudibleInk", withExtension: "icns"),
-                       let icon = NSImage(contentsOf: url) {
-                        NSApplication.shared.applicationIconImage = icon
-                        NSApplication.shared.dockTile.display()
-                    }
-                }
                 .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in reader.shutdown() }
-        }.windowStyle(.hiddenTitleBar).defaultSize(width: 1400, height: 900)
+        }.defaultSize(width: 1200, height: 820)
         .commands {
-            CommandGroup(replacing: .newItem) {
-                Button("Open Document…", action: reader.openFile).keyboardShortcut("o")
+            CommandGroup(replacing: .newItem) { Button("Open Document…", action: reader.openFile) }
+            CommandGroup(replacing: .appSettings) { Button("Settings…") { reader.perform("settings") } }
+            CommandMenu("Playback") {
+                Button("Play / Pause", action: reader.togglePlayback)
+                Button("Stop", action: reader.stop)
+                Picker("Voice", selection: $reader.voice) { ForEach(reader.modelVoices) { voice in Text("\(voice.name) · \(voice.detail)").tag(voice.id) } }
+                Menu("Speed") { Picker("Speed", selection: $reader.speed) { ForEach([0.5, 0.75, 1, 1.25, 1.5, 1.75, 2], id: \.self) { speed in Text(String(format: "%.2f×", speed)).tag(speed) } } }
             }
-            CommandGroup(replacing: .help) {
-                Button("Keyboard Shortcuts…") { reader.showShortcuts = true }
+            CommandGroup(after: .sidebar) {
+                Button(reader.floating ? "Show Main Window" : "Show Floating Player", action: reader.toggleFloating)
+                Toggle("Floating Player Always on Top", isOn: $reader.alwaysOnTop)
             }
+            CommandGroup(replacing: .help) { Button("Keyboard Shortcuts…") { reader.perform("settings"); reader.settingsTab = "shortcuts" } }
         }
     }
 }

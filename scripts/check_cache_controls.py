@@ -10,7 +10,7 @@ root = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(root / 'backend'))
 from worker import AudioCache
 
-source = (root / 'Sources/MarkdownVoice.swift').read_text().split('struct ContentView: View {')[0]
+source = (root / 'Sources/MarkdownVoice.swift').read_text().split('@main struct MarkdownVoiceApp:')[0]
 # Keep test preferences separate from the user's settings and draft.
 source = source.replace('UserDefaults.standard', 'cacheTestDefaults')
 source += r'''
@@ -70,7 +70,7 @@ with tempfile.TemporaryDirectory(prefix='audibleink-cache-controls-') as temp:
     swift.write_text(source)
     binary = temp / 'CacheControlsCheck'
     subprocess.run(['swiftc', '-parse-as-library', '-swift-version', '5', '-module-cache-path',
-        str(root / '.cache/clang'), str(swift), '-o', str(binary), '-framework', 'SwiftUI',
-        '-framework', 'AppKit', '-framework', 'AVFoundation'], check=True)
+        str(root / '.cache/clang'), str(swift), str(root / 'Sources/MarkdownPreview.swift'), '-o', str(binary), '-framework', 'SwiftUI',
+        '-framework', 'AppKit', '-framework', 'AVFoundation', '-framework', 'WebKit', '-framework', 'PDFKit'], check=True)
     subprocess.run([str(binary)], env={**os.environ, 'MARKDOWN_VOICE_ROOT': str(root),
         'AUDIBLEINK_AUDIO_CACHE': str(cache.directory)}, check=True, timeout=30)

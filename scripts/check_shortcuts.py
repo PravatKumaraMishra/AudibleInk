@@ -27,8 +27,15 @@ harness = r'''
         for flags: NSEvent.ModifierFlags in [.control, .option, [.command, .shift], [.command, .option]] {
             precondition(PlaybackShortcuts.command(for: "s", modifiers: flags, editing: false) == nil)
         }
-        precondition(PlaybackShortcuts.command(for: "o", modifiers: .command, editing: true) == nil)
+        precondition(PlaybackShortcuts.command(for: "o", modifiers: .command, editing: true) == "open")
         precondition(PlaybackShortcuts.command(for: "x", modifiers: [], editing: false) == nil)
+        precondition(PlaybackShortcuts.command(for: "t", modifiers: .command, editing: true) == "floating")
+        precondition(PlaybackShortcuts.command(for: ",", modifiers: .command, editing: true) == "settings")
+        var custom = ShortcutBinding.defaults
+        let index = custom.firstIndex(where: { $0.id == "floating" })!
+        custom[index].key = "g"
+        precondition(PlaybackShortcuts.command(for: "t", modifiers: .command, editing: false, bindings: custom) == nil)
+        precondition(PlaybackShortcuts.command(for: "g", modifiers: .command, editing: true, bindings: custom) == "floating")
         print("PASS: command aliases, typing protection, Escape, passage keys, unrelated modifiers")
     }
 }
