@@ -1,0 +1,3 @@
+# An archive URL avoids requiring Git or Xcode on users' Macs.
+indic-f5-mlx @ https://github.com/yogen-ghodke-113/indic-f5-mlx/archive/10d019a257a15ab6f4151dc644d07a642e55c25b.zip
+scipy==1.17.1

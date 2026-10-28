@@ -17,6 +17,7 @@ VOICES = {'af_heart', 'af_bella', 'am_adam', 'am_michael', 'bf_emma', 'bm_george
 
 
 from document import prepare_document, pronunciation_text
+from dependencies import ensure_engine
 
 
 def markdown_chunks(source, include_code=False, limit=360):
@@ -270,6 +271,9 @@ def main():
                             print(json.dumps({'id': rid, 'path': path, 'cache_hit': True,
                                               'cache_key': key, **cache.info()}), file=sys.__stdout__, flush=True)
                             continue
+                        def setup_progress(message):
+                            print(json.dumps({'event': 'setup', 'message': message}), file=sys.__stdout__, flush=True)
+                        ensure_engine(engine, setup_progress)
                         import numpy as np
                         import soundfile as sf
                         if model is None or model_engine != engine:
