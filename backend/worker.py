@@ -176,11 +176,24 @@ def reference_identity(request):
     return hashlib.sha256(path.read_bytes() + transcript.encode('utf-8')).hexdigest()
 
 
+def configure_espeak_data(temporary_directory):
+    # eSpeak falls back to its build-machine path when the supplied path is too
+    # long. Use a short, private copy for app bundles in deep folder hierarchies.
+    import espeakng_loader
+    from misaki.espeak import EspeakWrapper
+    data = Path(espeakng_loader.get_data_path())
+    if len(os.fsencode(data)) > 150:
+        data = Path(temporary_directory) / 'espeak-ng-data'
+        if not data.exists():
+            shutil.copytree(espeakng_loader.get_data_path(), data)
+    EspeakWrapper.set_data_path(str(data))
+
+
 def main():
     model = None
     model_engine = None
     cache = AudioCache()
-    with tempfile.TemporaryDirectory(prefix='markdown-voice-') as temp:
+    with tempfile.TemporaryDirectory(prefix='markdown-voice-', dir='/tmp') as temp:
         for line in sys.stdin:
             try:
                 request = json.loads(line)
@@ -265,6 +278,8 @@ def main():
                             model = None
                             gc.collect()
                             mx.clear_cache()
+                            if engine == 'kokoro':
+                                configure_espeak_data(temp)
                             if engine == 'indicf5':
                                 try:
                                     from indic_f5_mlx import load_indicf5
