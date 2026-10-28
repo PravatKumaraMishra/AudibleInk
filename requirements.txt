@@ -1,5 +1,9 @@
 mlx-audio==0.6.1
-misaki[en]==0.9.4
+# The small English pipeline avoids the unused transformer/PyTorch extra.
+misaki==0.9.4
+espeakng-loader==0.2.4
+num2words==0.5.14
+phonemizer-fork==3.3.2
 soundfile==0.14.0
 markdown-it-py==4.2.0
 spacy==3.8.11
@@ -7,3 +11,9 @@ spacy==3.8.11
 preshed==3.0.10
 cymem==2.0.11
 murmurhash==1.0.13
+
+# Native Apple Silicon IndicF5 inference (reference clip + transcript).
+indic-f5-mlx @ git+https://github.com/yogen-ghodke-113/indic-f5-mlx.git@10d019a257a15ab6f4151dc644d07a642e55c25b
+
+# Small English pronunciation tokenizer; speech weights download on first use.
+en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl
