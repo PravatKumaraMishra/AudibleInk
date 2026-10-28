@@ -14,6 +14,8 @@ let draftTestDefaults = UserDefaults(suiteName: draftTestSuite)!
         defer { draftTestDefaults.removePersistentDomain(forName: draftTestSuite) }
         let reader = Reader()
         defer { reader.shutdown() }
+        precondition(reader.recentDocuments.isEmpty)
+        precondition(reader.referenceVoices.isEmpty)
         reader.markdown = "First pasted document"
         reader.documentChanged()
         precondition(reader.recentDocuments.count == 1)
@@ -39,7 +41,18 @@ let draftTestDefaults = UserDefaults(suiteName: draftTestSuite)!
         reader.openRecent(persisted[1])
         precondition(reader.markdown == "First pasted document edited")
         precondition(reader.timeLabel(125) == "2:05")
-        print("PASS: numbered pasted drafts, updates, rename, persistence, reopen, time formatting")
+        let imported = RecentDocument(id: "imported", title: "Original file", path: "/tmp/keep-original.md")
+        reader.recentDocuments.append(imported)
+        reader.removeRecent(imported)
+        precondition(!reader.recentDocuments.contains { $0.id == imported.id })
+        let current = reader.recentDocuments.first { $0.text == reader.markdown }!
+        reader.removeRecent(current)
+        precondition(reader.markdown.isEmpty)
+        precondition(!reader.recentDocuments.contains { $0.id == current.id })
+        precondition(draftTestDefaults.string(forKey: "document") == nil)
+        let remaining = try! JSONDecoder().decode([RecentDocument].self, from: draftTestDefaults.data(forKey: "recentDocuments")!)
+        precondition(!remaining.contains { $0.id == current.id })
+        print("PASS: remove recent imports and active drafts; numbered pasted drafts, updates, rename, persistence, reopen, time formatting")
     }
 }
 '''

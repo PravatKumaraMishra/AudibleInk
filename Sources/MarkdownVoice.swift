@@ -4,6 +4,37 @@ import AVFoundation
 import UniformTypeIdentifiers
 import PDFKit
 
+struct GitHubRelease: Decodable {
+    let tag_name: String
+    let html_url: String
+    let draft: Bool
+    let prerelease: Bool
+}
+
+enum AppUpdates {
+    static var session = URLSession.shared
+    static let latestURL = URL(string: "https://api.github.com/repos/PravatKumaraMishra/AudibleInk/releases/latest")!
+    static var installedVersion: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.2.1" }
+    static func versionNumbers(_ version: String) -> [Int]? {
+        let clean = version.hasPrefix("v") ? String(version.dropFirst()) : version
+        let pieces = clean.split(separator: ".", omittingEmptySubsequences: false)
+        guard (2...3).contains(pieces.count), pieces.allSatisfy({ !$0.isEmpty && $0.allSatisfy({ $0.isASCII && $0.isNumber }) }) else { return nil }
+        let numbers = pieces.compactMap { Int($0) }
+        guard numbers.count == pieces.count else { return nil }
+        return numbers + Array(repeating: 0, count: 3 - numbers.count)
+    }
+    static func isNewer(_ tag: String, than current: String) -> Bool {
+        guard let remote = versionNumbers(tag), let local = versionNumbers(current) else { return false }
+        return local.lexicographicallyPrecedes(remote)
+    }
+    static func releaseURL(_ value: String) -> URL? {
+        guard let url = URL(string: value), url.scheme == "https", url.host == "github.com",
+              url.user == nil, url.password == nil, url.port == nil,
+              url.path.hasPrefix("/PravatKumaraMishra/AudibleInk/releases/tag/") else { return nil }
+        return url
+    }
+}
+
 struct Voice: Identifiable, Hashable {
     let id: String
     let name: String
@@ -72,6 +103,47 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var alwaysOnTop = UserDefaults.standard.bool(forKey: "alwaysOnTop") {
         didSet { UserDefaults.standard.set(alwaysOnTop, forKey: "alwaysOnTop"); floatingWindow?.level = alwaysOnTop ? .floating : .normal }
     }
+    @Published var checkUpdatesOnLaunch = UserDefaults.standard.bool(forKey: "checkUpdatesOnLaunch") {
+        didSet { UserDefaults.standard.set(checkUpdatesOnLaunch, forKey: "checkUpdatesOnLaunch") }
+    }
+    @Published var checkingForUpdates = false
+    @Published var updateMessage = "Check GitHub for a newer version of AudibleInk."
+    @Published var availableUpdateURL: URL?
+    @Published var availableUpdateVersion = ""
+    func checkForUpdates(session: URLSession = AppUpdates.session) {
+        guard !checkingForUpdates else { return }
+        checkingForUpdates = true
+        updateMessage = "Checking for updates…"
+        var request = URLRequest(url: AppUpdates.latestURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 20)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        request.setValue("AudibleInk/\(AppUpdates.installedVersion)", forHTTPHeaderField: "User-Agent")
+        session.dataTask(with: request) { [weak self] data, response, error in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.checkingForUpdates = false
+                guard error == nil, let http = response as? HTTPURLResponse, http.statusCode == 200,
+                      let data, let release = try? JSONDecoder().decode(GitHubRelease.self, from: data),
+                      !release.draft, !release.prerelease,
+                      AppUpdates.versionNumbers(release.tag_name) != nil,
+                      let url = AppUpdates.releaseURL(release.html_url) else {
+                    self.updateMessage = "Couldn't check for updates. Check your connection and try again."
+                    return
+                }
+                if AppUpdates.isNewer(release.tag_name, than: AppUpdates.installedVersion) {
+                    self.availableUpdateURL = url
+                    self.availableUpdateVersion = release.tag_name
+                    self.updateMessage = "\(release.tag_name) is available. Download it from GitHub to update."
+                } else {
+                    self.availableUpdateURL = nil
+                    self.availableUpdateVersion = ""
+                    self.updateMessage = "You're up to date (\(AppUpdates.installedVersion))."
+                }
+            }
+        }.resume()
+    }
+    func openAvailableUpdate() {
+        if let url = availableUpdateURL { NSWorkspace.shared.open(url) }
+    }
     @Published var recentDocuments: [RecentDocument] = []
     private var currentDocumentID = UserDefaults.standard.string(forKey: "currentDocumentID")
     @Published var renamingDocumentID: String?
@@ -133,6 +205,22 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         saveRecents(); refreshPreview()
         DispatchQueue.main.async { self.loadingDocument = false }
     }
+    func removeRecent(_ document: RecentDocument) {
+        recentDocuments.removeAll { $0.id == document.id }
+        if renamingDocumentID == document.id { renamingDocumentID = nil }
+        if currentDocumentID == document.id {
+            stop()
+            loadingDocument = true
+            currentDocumentID = nil
+            markdown = ""
+            filename = "New document"
+            UserDefaults.standard.removeObject(forKey: "document")
+            refreshPreview()
+            DispatchQueue.main.async { self.loadingDocument = false }
+        }
+        saveRecents()
+    }
+
     func renameRecent(_ document: RecentDocument) {
         renamingDocumentID = document.id; renameText = document.title
     }
@@ -301,6 +389,9 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         }
         if UserDefaults.standard.string(forKey: "document") != nil { saveDraft() }
         refreshPreview()
+        if checkUpdatesOnLaunch {
+            DispatchQueue.main.async { [weak self] in self?.checkForUpdates() }
+        }
     }
 
     // Successful playback marks this WAV as recently used for size-based eviction.
@@ -415,6 +506,9 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         env["TOKENIZERS_PARALLELISM"] = "false"
         env["HF_HUB_DISABLE_XET"] = "1"
         env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["PYTHONNOUSERSITE"] = "1"
+        env.removeValue(forKey: "PYTHONPATH")
+        env.removeValue(forKey: "PYTHONHOME")
         env["HF_HOME"] = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/MarkdownVoice/huggingface").path
         task.environment = env
         task.standardInput = stdin; task.standardOutput = stdout; task.standardError = stderr
@@ -452,8 +546,12 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         while let newline = buffer.firstIndex(of: 10) {
             let line = buffer.prefix(upTo: newline)
             buffer.removeSubrange(...newline)
-            guard let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any],
-                  let id = message["id"] as? String else { continue }
+            guard let message = try? JSONSerialization.jsonObject(with: line) as? [String: Any] else { continue }
+            if message["event"] as? String == "setup", let detail = message["message"] as? String {
+                if active { status = detail }
+                continue
+            }
+            guard let id = message["id"] as? String else { continue }
             if let bytes = message["cache_bytes"] as? NSNumber { cacheBytes = bytes.int64Value }
             if let count = message["cache_files"] as? Int { cacheFiles = count }
             callbacks.removeValue(forKey: id)?(message)
@@ -654,6 +752,10 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         userDidInteract()
     }
     private func fail(_ message: String) { if deletingModel { deletingModel = false; modelMessage = message }; cacheBusy = false; stop(); error = message; status = "Something needs attention" }
+    func quit() {
+        shutdown()
+        NSApplication.shared.terminate(nil)
+    }
     func shutdown() {
         stop(); releaseWorker()
         if let activityMonitor { NSEvent.removeMonitor(activityMonitor) }; activityMonitor = nil
@@ -932,8 +1034,30 @@ struct RecentDocumentRow: View {
                 }.buttonStyle(.plain).help(document.path ?? document.title)
                 Button { reader.renameRecent(document) } label: { Image(systemName: "pencil") }
                     .buttonStyle(.plain).opacity(row.hovering ? 1 : 0).help("Rename document")
+                Button { reader.removeRecent(document) } label: { Image(systemName: "xmark") }
+                    .buttonStyle(.plain).opacity(row.hovering ? 1 : 0)
+                    .help("Remove from recents").accessibilityLabel("Remove \(document.title) from recents")
             }
         }.padding(.horizontal, 8).padding(.vertical, 4).onHover { row.hovering = $0 }
+    }
+}
+
+struct UpdateNotice: View {
+    @ObservedObject var reader: Reader
+    var compact = false
+    var body: some View {
+        Button { reader.openSettings("updates") } label: {
+            Text(compact ? "Update\navailable" : "Update available")
+                .font(.system(size: compact ? 9 : 11, weight: .semibold))
+                .multilineTextAlignment(.center)
+                .foregroundStyle(Color.accentColor)
+                .padding(.horizontal, compact ? 5 : 12).padding(.vertical, 6)
+                .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 9))
+                .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.accentColor.opacity(0.25)))
+                .shadow(color: .black.opacity(0.12), radius: 4, y: 2)
+        }.buttonStyle(.plain)
+            .help("\(reader.availableUpdateVersion) is available. Open Updates.")
+            .accessibilityLabel("Update available. Open update settings.")
     }
 }
 
@@ -971,7 +1095,14 @@ struct ContentView: View {
                         }
                     }
                     Spacer()
-                    Button { reader.openSettings() } label: { Label("Settings", systemImage: "gearshape") }.buttonStyle(.plain)
+                    if reader.availableUpdateURL != nil {
+                        UpdateNotice(reader: reader)
+                    }
+                    HStack {
+                        Button { reader.openSettings() } label: { Label("Settings", systemImage: "gearshape") }
+                        Spacer()
+                        Button(action: reader.quit) { Label("Quit", systemImage: "power") }.help("Quit AudibleInk")
+                    }.buttonStyle(.plain)
                 }.padding(18).frame(width: 225).background(Color(nsColor: .controlBackgroundColor))
                 Divider()
             } else {
@@ -980,7 +1111,11 @@ struct ContentView: View {
                     Button(action: reader.openFile) { Image(systemName: "doc.badge.plus").frame(width: 30, height: 30) }.help("Open Document")
                     Button(action: reader.newDraft) { Image(systemName: "square.and.pencil").frame(width: 30, height: 30) }.help("New Text")
                     Spacer()
+                    if reader.availableUpdateURL != nil {
+                        UpdateNotice(reader: reader, compact: true)
+                    }
                     Button { reader.openSettings() } label: { Image(systemName: "gearshape") }.help("Settings")
+                    Button(action: reader.quit) { Image(systemName: "power") }.help("Quit AudibleInk").accessibilityLabel("Quit AudibleInk")
                 }.buttonStyle(.plain).font(.system(size: 17)).padding(.vertical, 18).frame(width: 58)
                     .background(Color(nsColor: .controlBackgroundColor))
                 Divider()
@@ -1032,7 +1167,7 @@ struct ContentView: View {
 
 struct ReaderSettings: View {
     @ObservedObject var reader: Reader
-    private let sections = [("general", "General", "gearshape"), ("cache", "Audio Cache", "internaldrive"), ("dictionary", "Dictionary", "character.book.closed"), ("shortcuts", "Keyboard Shortcuts", "keyboard"), ("tips", "Listening Tip", "info.circle")]
+    private let sections = [("general", "General", "gearshape"), ("updates", "Updates", "arrow.down.circle"), ("cache", "Audio Cache", "internaldrive"), ("dictionary", "Dictionary", "character.book.closed"), ("shortcuts", "Keyboard Shortcuts", "keyboard"), ("tips", "Listening Tip", "info.circle")]
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
@@ -1069,6 +1204,19 @@ struct ReaderSettings: View {
             Text("One replacement per line: API = A P I").font(.caption).foregroundStyle(.secondary)
             TextEditor(text: $reader.pronunciations).font(.system(.body, design: .monospaced))
             Toggle("Technical pronunciation cleanup", isOn: $reader.technical)
+        case "updates":
+            HStack {
+                Text("Version \(AppUpdates.installedVersion)").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                Button(reader.checkingForUpdates ? "Checking…" : "Check for Updates") { reader.checkForUpdates() }
+                    .disabled(reader.checkingForUpdates)
+            }
+            Toggle("Check for updates at launch", isOn: $reader.checkUpdatesOnLaunch)
+                .toggleStyle(.checkbox)
+            Text(reader.updateMessage).font(.caption).foregroundStyle(.secondary)
+            if reader.availableUpdateURL != nil {
+                Button("Download \(reader.availableUpdateVersion) from GitHub", action: reader.openAvailableUpdate)
+            }
         case "shortcuts": ShortcutEditor(reader: reader)
         case "tips":
             Text("For documents or notes with complex code blocks or diagrams, ask an LLM to create a TTS-friendly version for a better listening experience.")
