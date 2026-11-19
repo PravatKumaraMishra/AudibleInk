@@ -16,7 +16,7 @@ MODELS = {'kokoro': MODEL, 'soprano': 'mlx-community/Soprano-80M-bf16', 'svara':
 VOICES = {'af_heart', 'af_bella', 'am_adam', 'am_michael', 'bf_emma', 'bm_george', 'hf_alpha', 'hm_omega'}
 
 
-from document import prepare_document, pronunciation_text
+from document import prepare_document, pronunciation_text, without_emoji
 from dependencies import ensure_engine
 
 
@@ -248,7 +248,8 @@ def main():
                         result = {}
                     elif request['command'] == 'prepare':
                         result = prepare_document(request['text'], request.get('include_code', False))
-                        result['speech_chunks'] = [pronunciation_text(c, request.get('pronunciations', ''), request.get('technical', True)) for c in result['chunks']]
+                        speech_chunks = [without_emoji(c) if request.get('ignore_emoji', True) else c for c in result['chunks']]
+                        result['speech_chunks'] = [pronunciation_text(c, request.get('pronunciations', ''), request.get('technical', True)) for c in speech_chunks]
                     elif request['command'] == 'synth':
                         engine = request.get('engine', 'kokoro')
                         if engine not in tuple(MODELS):

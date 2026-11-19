@@ -23,6 +23,11 @@ class MarkdownTests(unittest.TestCase):
     def test_inline_code_image_and_list(self):
         self.assertEqual(markdown_chunks('- Use `pip`.\n- ![A cat](cat.png)'), ['Use pip.', 'A cat'])
 
+    def test_remove_emoji_for_speech(self):
+        from document import without_emoji
+        self.assertEqual(without_emoji('Hello 👋🏽 world 🚀!'), 'Hello world !')
+        self.assertEqual(without_emoji('Keep © text and punctuation.'), 'Keep © text and punctuation.')
+
 
 class PreviewTests(unittest.TestCase):
     def test_full_markdown_and_anchors(self):

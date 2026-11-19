@@ -21,6 +21,21 @@ def split_text(text, limit=360):
     return chunks
 
 
+def without_emoji(text):
+    """Remove emoji sequences from speech while preserving ordinary punctuation."""
+    emoji = re.compile(
+        '['
+        '\U0001F1E6-\U0001F1FF'  # flags
+        '\U0001F300-\U0001FAFF'  # pictographs, symbols, and supplemental emoji
+        '\u2600-\u27BF'          # miscellaneous symbols and dingbats
+        ']'
+    )
+    text = emoji.sub('', text)
+    # Remove modifiers and joiners left behind by multi-code-point emoji.
+    text = re.sub(r'[\U0001F3FB-\U0001F3FF\u200D\uFE0E\uFE0F\u20E3]', '', text)
+    return re.sub(r'\s+', ' ', text).strip()
+
+
 def annotated_parts(parts, chunks, first):
     """Map original inline text, including formatting boundaries, to speech chunks."""
     raw = ''.join(parts)

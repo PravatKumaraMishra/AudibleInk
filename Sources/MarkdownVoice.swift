@@ -287,6 +287,9 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
     @Published var followReading = (UserDefaults.standard.object(forKey: "followReading") as? Bool) ?? true {
         didSet { UserDefaults.standard.set(followReading, forKey: "followReading") }
     }
+    @Published var ignoreEmoji = (UserDefaults.standard.object(forKey: "ignoreEmoji") as? Bool) ?? true {
+        didSet { UserDefaults.standard.set(ignoreEmoji, forKey: "ignoreEmoji") }
+    }
     @Published var showPronunciations = false
     @Published var showShortcuts = false
     @Published var showListeningTip = false
@@ -613,7 +616,7 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
         sessionPrivateAudio = privateAudio
         let session = generation
         UserDefaults.standard.set(pronunciations, forKey: "pronunciations")
-        request(["command": "prepare", "text": markdown, "include_code": includeCode, "pronunciations": pronunciations, "technical": technical]) { [weak self] response in
+        request(["command": "prepare", "text": markdown, "include_code": includeCode, "ignore_emoji": ignoreEmoji, "pronunciations": pronunciations, "technical": technical]) { [weak self] response in
             guard let self, self.generation == session else { return }
             if let error = response["error"] as? String { self.fail(error); return }
             self.chunks = response["chunks"] as? [String] ?? []
@@ -629,6 +632,10 @@ final class Reader: NSObject, ObservableObject, AVAudioPlayerDelegate {
 
     private func fillQueue() {
         guard active, !generating, queue.isEmpty, nextIndex < chunks.count else { return }
+        while nextIndex < speechChunks.count && speechChunks[nextIndex].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            nextIndex += 1
+        }
+        if nextIndex == chunks.count { playNext(); return }
         generating = true
         let index = nextIndex; nextIndex += 1
         let session = generation
@@ -1227,6 +1234,7 @@ struct ReaderSettings: View {
                 Text("System").tag("system"); Text("Light").tag("light"); Text("Dark").tag("dark")
             }
             Toggle("Follow reading", isOn: $reader.followReading)
+            Toggle("Ignore emoji", isOn: $reader.ignoreEmoji)
             Toggle("Read code blocks", isOn: $reader.includeCode)
             Toggle("Floating player always on top", isOn: $reader.alwaysOnTop)
             Divider()
